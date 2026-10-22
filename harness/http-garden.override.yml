@@ -1,0 +1,6 @@
+# Local workaround: Docker Desktop's DNS proxy fails to resolve dl.google.com (Go bootstrap download).
+services:
+  go_stdlib:
+    build:
+      extra_hosts:
+        - "dl.google.com:172.217.75.93"

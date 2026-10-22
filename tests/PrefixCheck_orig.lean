@@ -1,0 +1,49 @@
+import Std.Http
+
+/-!
+Prefix-consistency check: for a parser `p` and a complete valid input `s`, every strict prefix of
+`s` must either fail with `.eof` (the protocol machine then waits for more data) or produce the same
+outcome as `s` itself. A prefix that yields a different success, or a non-`.eof` error, means the
+message's fate depends on how its bytes were split across reads.
+-/
+
+open Std.Internal.Parsec
+open Std.Http.Protocol.H1
+
+inductive Out where
+  | needMore
+  | ok (consumed : Nat) (value : String)
+  | fail (msg : String)
+deriving BEq, Repr
+
+def outcome (p : ByteArray.Parser α) (render : α → String) (input : _root_.ByteArray) : Out :=
+  match p input.iter with
+  | .success it a => .ok it.idx (render a)
+  | .error _ .eof => .needMore
+  | .error _ (.other m) => .fail m
+
+def check (name : String) (p : ByteArray.Parser α) (render : α → String) (inputs : List String) : IO Nat := do
+  let mut bad := 0
+  for s in inputs do
+    let full := s.toUTF8
+    let whole := outcome p render full
+    for k in List.range full.size do
+      let o := outcome p render (full.extract 0 k)
+      unless o == .needMore || o == whole do
+        bad := bad + 1
+        IO.println s!"  {name}: input {s.quote} cut at {k}: prefix gives {repr o}, full gives {repr whole}"
+  return bad
+
+def main : IO Unit := do
+  let cfg : Config := {}
+  let mut total := 0
+  total := total + (← check "parseChunkSize" (parseChunkSize cfg) (fun (n, e) => s!"{n}/{e.size}")
+    ["5\r\n", "A\r\n", "5;a=b\r\n", "5 ; a = b\r\n", "5;a=\"b c\"\r\n", "5;a=\"b\\\"c\"\r\n", "5;a;b=c\r\n", "0;a\r\n"])
+  total := total + (← check "parseLastChunkBody" (parseLastChunkBody cfg) (fun _ => "()")
+    ["\r\n", "X-T: a\r\n\r\n", "X-T: a\r\nY: b\r\n\r\n", "X-T:\r\n\r\n"])
+  total := total + (← check "parseRequestLineRawVersion" (parseRequestLineRawVersion cfg) (fun _ => "line")
+    ["GET / HTTP/1.1\r\n", "POST /a?b=c HTTP/1.1\r\n", "PATCH / HTTP/1.1\r\n", "PUT / HTTP/1.0\r\n",
+     "OPTIONS * HTTP/1.1\r\n", "GET http://b/x HTTP/1.1\r\n", "CONNECT a:80 HTTP/1.1\r\n"])
+  total := total + (← check "parseSingleHeader" (parseSingleHeader cfg) (fun r => toString (r.map (·.1)))
+    ["Host: a\r\n", "X: a b \t\r\n", "Content-Length: 5\r\n", "\r\n"])
+  IO.println s!"orig (Std.Http): {total} prefix-consistency violations"

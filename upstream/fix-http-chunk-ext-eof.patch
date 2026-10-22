@@ -1,0 +1,81 @@
+diff --git a/src/Std/Http/Protocol/H1/Parser.lean b/src/Std/Http/Protocol/H1/Parser.lean
+index 4a8d366..8d35b02 100644
+--- a/src/Std/Http/Protocol/H1/Parser.lean
++++ b/src/Std/Http/Protocol/H1/Parser.lean
+@@ -50,13 +50,27 @@ def isOwsByte (c : UInt8) : Bool :=
+ 
+ -- Parser blocks
+ 
++/--
++Like `optional (attempt p)`, but an `.eof` failure of `p` is propagated instead of becoming `none`.
++
++The protocol machine treats `.eof` as "need more data". If an item is cut off by the end of the
++currently buffered input, swallowing the `.eof` would backtrack and let the next parser fail on the
++unfinished item's bytes, turning a valid message into a hard parse error.
++-/
++@[inline]
++def optionalUnlessEof (p : Parser α) : Parser (Option α) := fun it =>
++  match p it with
++  | .success rem res => .success rem (some res)
++  | .error rem .eof => .error rem .eof
++  | .error _ _ => .success it none
++
+ /--
+ Repeatedly applies `parser` until it returns `none` or the `maxCount` limit is
+ exceeded. Returns the collected results as an array.
+ -/
+ partial def manyItems {α : Type} (parser : Parser (Option α)) (maxCount : Nat) : Parser (Array α) := do
+   let rec go (acc : Array α) : Parser (Array α) := do
+-    let step ← optional <| attempt do
++    let step ← optionalUnlessEof do
+       match ← parser with
+       | none => fail "end of items"
+       | some x => return x
+@@ -400,7 +414,7 @@ Parses the size and extensions of a chunk.
+ -/
+ public def parseChunkSize (limits : H1.Config) : Parser (Nat × Array (Chunk.ExtensionName × Option Chunk.ExtensionValue)) := do
+   let size ← hex
+-  let ext ← manyItems (optional (attempt (parseChunkExt limits))) limits.maxChunkExtensions
++  let ext ← manyItems (optionalUnlessEof (parseChunkExt limits)) limits.maxChunkExtensions
+   crlf
+   return (size, ext)
+ 
+diff --git a/tests/elab/async_http_h1_incremental.lean b/tests/elab/async_http_h1_incremental.lean
+index 5ef63d5..96986f4 100644
+--- a/tests/elab/async_http_h1_incremental.lean
++++ b/tests/elab/async_http_h1_incremental.lean
+@@ -315,3 +315,34 @@ private def getEndHeadersHead (events : Array (Event .receiving)) : Option Reque
+   events.findSome? fun
+     | .endHeaders head => some head
+     | _ => none
++
++-- Regression: a read boundary inside a chunk extension must not fail a valid request.
++-- `parseChunkSize` used to wrap `parseChunkExt` in `optional (attempt …)`, which turned the
++-- extension parser's `.eof` into "no extension", so the following CRLF check failed on `;`.
++#eval show IO Unit from do
++  let body := "hello".toUTF8
++  let payloads := #[
++    "5;a=b\r\nhello\r\n0\r\n\r\n",
++    "5 ; a = b\r\nhello\r\n0\r\n\r\n",
++    "5;a=\"b c\"\r\nhello\r\n0\r\n\r\n",
++    "5\r\nhello\r\n0;a\r\n\r\n"
++  ]
++  for payload in payloads do
++    let request := mkChunkedRequest "/inc-chunk-ext" payload.toUTF8
++    let trace := runIncrementalReceiving (splitEveryByte request)
++    assertIncrementalSuccess s!"Chunk extension one-byte incremental parse {payload.quote}" trace body
++
++-- Regression: a read boundary inside a trailer field must not fail a valid request
++-- (`manyItems` had the same `optional (attempt …)` pattern).
++#eval show IO Unit from do
++  let body := "hello".toUTF8
++  let request := mkChunkedRequest "/inc-trailer" "5\r\nhello\r\n0\r\nX-T: a\r\nY: b\r\n\r\n".toUTF8
++  let trace := runIncrementalReceiving (splitEveryByte request)
++  assertIncrementalSuccess "Trailer one-byte incremental parse" trace body
++
++-- A chunk-size line cut inside an extension must report `.eof` so the machine waits for more data.
++#eval show IO Unit from do
++  for input in ["5;", "5 ", "5;a", "5;a=", "5;a=\"b"] do
++    match parseChunkSize {} input.toUTF8.iter with
++    | .error _ .eof => pure ()
++    | _ => throw <| IO.userError s!"expected .eof for truncated chunk-size line {input.quote}"

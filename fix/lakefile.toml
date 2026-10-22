@@ -1,0 +1,7 @@
+name = "httpfix"
+version = "0.1.0"
+defaultTargets = ["HttpFix"]
+
+[[lean_lib]]
+name = "HttpFix"
+srcDir = "src"

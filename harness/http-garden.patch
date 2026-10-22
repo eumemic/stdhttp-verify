@@ -1,0 +1,25 @@
+diff --git a/docker-compose.yml b/docker-compose.yml
+index f4e21cb..3adebae 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -570,3 +570,10 @@ services:
+     - ./tools:/tools
+     x-props:
+       role: transducer
++  lean_stdhttp:
++    build:
++      args:
++        LEAN_TOOLCHAIN: leanprover/lean4:nightly-2026-10-20
++      context: ../../servers/lean_stdhttp
++    x-props:
++      role: origin
+diff --git a/quirks.yml b/quirks.yml
+index 574081a..5237167 100644
+--- a/quirks.yml
++++ b/quirks.yml
+@@ -150,3 +150,5 @@ yahns:
+   header-name-translation: {'-': '_'}
+   joins-duplicate-headers: true
+   duplicate-header-joiner: ","
++lean_stdhttp:
++  method-whitelist: ['ACL', 'BASELINE-CONTROL', 'BIND', 'CHECKIN', 'CHECKOUT', 'COPY', 'DELETE', 'GET', 'LABEL', 'LINK', 'LOCK', 'MERGE', 'MKACTIVITY', 'MKCALENDAR', 'MKCOL', 'MKREDIRECTREF', 'MKWORKSPACE', 'MOVE', 'ORDERPATCH', 'PATCH', 'POST', 'PROPFIND', 'PROPPATCH', 'PUT', 'QUERY', 'REBIND', 'REPORT', 'SEARCH', 'UNBIND', 'UNCHECKOUT', 'UNLINK', 'UNLOCK', 'UPDATE', 'UPDATEREDIRECTREF', 'VERSION-CONTROL', 'HEAD', 'OPTIONS', 'CONNECT', 'TRACE']

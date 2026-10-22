@@ -1,0 +1,7 @@
+name = "garden_echo"
+version = "0.1.0"
+defaultTargets = ["echo"]
+
+[[lean_exe]]
+name = "echo"
+root = "Main"

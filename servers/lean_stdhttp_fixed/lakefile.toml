@@ -1,0 +1,11 @@
+name = "garden_echo_fixed"
+version = "0.1.0"
+defaultTargets = ["echo"]
+
+[[require]]
+name = "httpfix"
+path = "../../fix"
+
+[[lean_exe]]
+name = "echo"
+root = "Main"

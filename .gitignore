@@ -1,0 +1,10 @@
+vendor/
+logs/
+out/
+servers/lean_stdhttp/.lake/
+fix/.lake/
+spec/.lake/
+servers/lean_stdhttp_fixed/.lake/
+upstream/lean4/
+__pycache__/
+**/.lake/

@@ -1,0 +1,16 @@
+name = "spec"
+version = "0.1.0"
+defaultTargets = ["Spec", "SpecReal"]
+
+[[require]]
+name = "httpfix"
+path = "../fix"
+
+[[lean_lib]]
+name = "Spec"
+
+# Built as separate modules: `Original` imports Lean's `Std.Http`, `Fixed` imports the patched
+# copy, and the two cannot share one environment (they define the same names).
+[[lean_lib]]
+name = "SpecReal"
+roots = ["Spec.Real.Original", "Spec.Real.Fixed", "Spec.Real.Equiv", "Spec.Real.Server"]
