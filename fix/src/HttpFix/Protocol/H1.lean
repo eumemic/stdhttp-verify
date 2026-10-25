@@ -17,6 +17,11 @@ public import HttpFix.Protocol.H1.Reader
 public import HttpFix.Protocol.H1.Writer
 public import HttpFix.Protocol.H1.Event
 public import HttpFix.Protocol.H1.Redirect
+import all HttpFix.Protocol.H1.Reader
+import all HttpFix.Protocol.H1.Writer
+import all HttpFix.Protocol.H1.Parser
+import all Std.Data.ByteSlice
+import all Std.Internal.Parsec.Basic
 
 public section
 
@@ -1074,6 +1079,32 @@ private def processCompleteStep (machine : Machine dir) : Machine dir :=
     machine.setWriterState .closed
     |>.addEvent .close
 
+/-! ### Termination of the writer loop
+
+`processWrite` moves the writer from flushing the head (`waitingForFlush`) to writing the body
+(`writingBody*`) to `complete`, and the body writers empty `userData` before looping. These
+measures make the loop total (it was a `partial def` upstream). -/
+
+/-- Rank of a writer state for the termination measure. -/
+private def writerRank : Writer.State → Nat
+  | .waitingForFlush => 3
+  | .writingBodyFixed _ => 2
+  | .writingBodyChunked => 2
+  | .writingBodyClosingFrame => 2
+  | _ => 0
+
+private theorem writerRank_writeHead (messageHead : Message.Head dir.swap) (machine : Machine dir) :
+    writerRank (writeHead messageHead machine).writer.state = 2 := by
+  unfold writeHead
+  simp only [modifyWriter]
+  split <;> (try split) <;> simp [writerRank]
+
+private theorem writeChunkedBody_spec (writer : Writer dir) (h : writer.userData.size > 0) :
+    (Writer.writeChunkedBody writer).userData.size = 0 ∧
+      (Writer.writeChunkedBody writer).state = writer.state := by
+  unfold Writer.writeChunkedBody
+  simp [show writer.userData.size ≠ 0 by omega]
+
 mutual
 
 /--
@@ -1081,18 +1112,22 @@ Marks writer message as complete and continues the writer state machine to apply
 post-completion transitions.
 -/
 @[inline]
-private partial def completeWriterMessage (machine : Machine dir) : Machine dir :=
+private def completeWriterMessage (machine : Machine dir) : Machine dir :=
   machine.setWriterState .complete
   |> processWrite
+termination_by (1, machine.writer.userData.size, 0)
+decreasing_by all_goals simp_wf; simp [setWriterState, modifyWriter, writerRank, Prod.lex_def]
 
 /--
 Completes a message whose body is intentionally omitted from wire output
 (`HEAD`/bodyless status handling).
 -/
 @[inline]
-private partial def completeOmittedBody (machine : Machine dir) : Machine dir :=
+private def completeOmittedBody (machine : Machine dir) : Machine dir :=
   machine.modifyWriter ({ · with userData := #[], userDataBytes := 0 })
   |> completeWriterMessage
+termination_by (1, machine.writer.userData.size, 1)
+decreasing_by all_goals (simp_wf; simp [modifyWriter, Prod.lex_def]; try omega)
 
 /--
 Processes a fixed-size body when remaining size is zero.
@@ -1101,7 +1136,7 @@ Accepts completion only when producer has closed and no extra bytes are queued;
 otherwise treats queued bytes as protocol error.
 -/
 @[inline]
-private partial def processFixedZeroBody (machine : Machine dir) : Machine dir :=
+private def processFixedZeroBody (machine : Machine dir) : Machine dir :=
   if machine.writer.userData.isEmpty then
     if machine.writer.userClosedBody then
       completeWriterMessage machine
@@ -1109,6 +1144,8 @@ private partial def processFixedZeroBody (machine : Machine dir) : Machine dir :
       machine
   else
     closeOnBadMessage machine
+termination_by (max 2 (writerRank machine.writer.state), machine.writer.userData.size, 2)
+decreasing_by all_goals (simp_wf; simp [Prod.lex_def]; try omega)
 
 /--
 Processes fixed-length body data when buffered user bytes are present.
@@ -1116,7 +1153,7 @@ Processes fixed-length body data when buffered user bytes are present.
 Enforces exact-length semantics (no overflow), writes up to remaining length,
 and updates writer state for any bytes still pending.
 -/
-private partial def processFixedBufferedBody (machine : Machine dir) (n : Nat) : Machine dir :=
+private def processFixedBufferedBody (machine : Machine dir) (n : Nat) : Machine dir :=
   let writer := machine.writer
   let bufferedBytes := bufferedUserDataBytes writer
   if bufferedBytes > n then
@@ -1141,6 +1178,8 @@ private partial def processFixedBufferedBody (machine : Machine dir) (n : Nat) :
         closeOnBadMessage machine
     else
       machine.setWriterState (.writingBodyFixed remaining)
+termination_by (max 2 (writerRank machine.writer.state), machine.writer.userData.size, 2)
+decreasing_by all_goals (simp_wf; simp [Prod.lex_def]; try omega)
 
 /--
 Handles fixed-length writer state when no user bytes are currently buffered.
@@ -1149,7 +1188,7 @@ If the producer closed without providing all declared bytes, closes both
 reader and writer and terminates the connection.
 -/
 @[inline]
-private partial def processFixedIdleBody (machine : Machine dir) : Machine dir :=
+private def processFixedIdleBody (machine : Machine dir) : Machine dir :=
   if machine.writer.userClosedBody then
     -- Producer finished without supplying all declared bytes.
     closeOnBadMessage machine
@@ -1161,7 +1200,7 @@ Dispatch for fixed-length body writing, including omitted-body fast path and
 zero/non-zero remaining-length handling.
 -/
 @[inline]
-private partial def processFixedBody (machine : Machine dir) (n : Nat) : Machine dir :=
+private def processFixedBody (machine : Machine dir) (n : Nat) : Machine dir :=
   if machine.writer.omitBody then
     completeOmittedBody machine
   else if n = 0 then
@@ -1170,24 +1209,34 @@ private partial def processFixedBody (machine : Machine dir) (n : Nat) : Machine
     processFixedBufferedBody machine n
   else
     processFixedIdleBody machine
+termination_by (max 2 (writerRank machine.writer.state), machine.writer.userData.size, 3)
+decreasing_by all_goals (simp_wf; simp [Prod.lex_def]; try omega)
 
 /--
 Processes chunked transfer-encoding output (HTTP/1.1).
 -/
-private partial def processChunkedBody (machine : Machine dir) : Machine dir :=
+private def processChunkedBody (machine : Machine dir) : Machine dir :=
   if machine.writer.omitBody then
     completeOmittedBody machine
   else if machine.writer.userClosedBody then
     machine.modifyWriter Writer.writeFinalChunk |> completeWriterMessage
-  else if machine.writer.userData.size > 0 then
+  else if _h : machine.writer.userData.size > 0 then
     machine.modifyWriter Writer.writeChunkedBody |> processWrite
   else
     machine
+termination_by (max 2 (writerRank machine.writer.state), machine.writer.userData.size, 3)
+decreasing_by
+  all_goals simp_wf
+  · simp [Prod.lex_def]; omega
+  · simp [Prod.lex_def]; omega
+  · obtain ⟨h1, h2⟩ := writeChunkedBody_spec machine.writer _h
+    simp only [modifyWriter, h1, h2, Prod.lex_def]
+    omega
 
 /--
 Processes connection-close body output (HTTP/1.0 server, unknown body length).
 -/
-private partial def processClosingFrameBody (machine : Machine dir) : Machine dir :=
+private def processClosingFrameBody (machine : Machine dir) : Machine dir :=
   if machine.writer.omitBody then
     completeOmittedBody machine
   else if machine.writer.userClosedBody then
@@ -1196,6 +1245,13 @@ private partial def processClosingFrameBody (machine : Machine dir) : Machine di
     machine.modifyWriter Writer.writeRawBody |> processWrite
   else
     machine
+termination_by (max 2 (writerRank machine.writer.state), machine.writer.userData.size, 3)
+decreasing_by
+  all_goals simp_wf
+  · simp [Prod.lex_def]; omega
+  · simp [Prod.lex_def]; omega
+  · simp only [modifyWriter, Writer.writeRawBody, Prod.lex_def, List.size_toArray, List.length_nil]
+    omega
 
 /--
 Advances writer-side state machine by one logical transition.
@@ -1206,8 +1262,8 @@ Depending on writer state, this may:
 - flush fixed/chunked body bytes,
 - finalize/close after completion.
 -/
-partial def processWrite (machine : Machine dir) : Machine dir :=
-  match machine.writer.state with
+def processWrite (machine : Machine dir) : Machine dir :=
+  match _h : machine.writer.state with
   | .pending =>
     if machine.reader.isClosed then machine.closeWriter else machine
   | .waitingHeaders =>
@@ -1237,6 +1293,11 @@ partial def processWrite (machine : Machine dir) : Machine dir :=
     processCompleteStep machine
   | .closed =>
     machine
+termination_by (writerRank machine.writer.state, machine.writer.userData.size, 4)
+decreasing_by
+  all_goals simp_wf
+  · rw [writerRank_writeHead, _h]; simp [writerRank, Prod.lex_def]
+  all_goals simp [_h, writerRank, Prod.lex_def]
 
 end
 
@@ -1416,6 +1477,310 @@ private def parseBody (machine : Machine dir) : Reader.BodyState → Machine dir
   | .chunkedBody ext size => parseChunkedBodyState machine ext size
   | .closeDelimited => parseCloseDelimitedBody machine
 
+/-! ### Termination of the reader loop
+
+Within one message the reader only moves forward through its phases (start line, headers, body,
+done). It loops in a phase only toward a configured limit: each header line raises the header
+count, which stays below `maxHeaders`, and each body step either moves from a chunk-size line to
+chunk data or reads at least one body byte, and body bytes stay within `maxBodySize`. These
+measures make `processRead` and `pullNextChunk` total (they were `partial def`s upstream). -/
+
+/-- Rank of a reader phase for the termination measure. -/
+private def readerPhase : Reader.State dir → Nat
+  | .needStartLine => 3
+  | .needHeader _ => 2
+  | .readBody _ => 1
+  | _ => 0
+
+/-- Header lines the reader may still accept in this message. -/
+private def headersLeft (machine : Machine dir) : Nat :=
+  match machine.reader.state with
+  | .needHeader k => machine.config.maxHeaders - k
+  | _ => 0
+
+/-- Body bytes the reader may still accept in this message. -/
+private def bodyLeft (machine : Machine dir) : Nat :=
+  machine.config.maxBodySize - machine.reader.bodyBytesRead
+
+/-- Within the body phase, a chunk-size line comes before its chunk data. -/
+private def bodySub : Reader.BodyState → Nat
+  | .chunkedSize => 1
+  | _ => 0
+
+private def stateSub : Reader.State dir → Nat
+  | .readBody bodyState => bodySub bodyState
+  | _ => 0
+
+private theorem size_slice (arr : ByteArray) (a b : Nat) (h1 : a ≤ b) (h2 : b ≤ arr.size) :
+    (arr[a...b] : ByteSlice).size = b - a := by
+  simp only [Std.Rco.Sliceable.mkSlice, Std.Rco.HasRcoIntersection.intersection, ByteArray.toByteSlice,
+    ByteSlice.size, ByteSlice.start, ByteSlice.stop]
+  split <;> (try split) <;> simp_all
+
+private theorem remainingBytes_eq (it : ByteArray.Iterator) :
+    it.remainingBytes = it.array.size - it.idx := by
+  rcases it with ⟨arr, i⟩
+  rfl
+
+/-- On success `parseFixedSizeData` returns a non-empty slice: all remaining input when it is
+shorter than `size`, else exactly `size` bytes. -/
+private theorem fixedSizeData_size {size : Nat} {it it' : ByteArray.Iterator} {t : TakeResult}
+    (h : parseFixedSizeData size it = .success it' t) :
+    match t with
+    | .incomplete d _ => d.size ≥ 1
+    | .complete d => d.size = size := by
+  unfold parseFixedSizeData at h
+  have hr := remainingBytes_eq it
+  split at h
+  · exact nomatch h
+  · split at h
+    · injection h with h1 h2
+      subst h2
+      show (it.array[it.idx...(it.idx + it.remainingBytes)] : ByteSlice).size ≥ 1
+      rw [size_slice _ _ _ (by omega) (by omega)]
+      omega
+    · injection h with h1 h2
+      subst h2
+      show (it.array[it.idx...(it.idx + size)] : ByteSlice).size = size
+      rw [size_slice _ _ _ (by omega) (by omega)]
+      omega
+
+private theorem chunkSizedData_size {size : Nat} {it it' : ByteArray.Iterator} {t : TakeResult}
+    (h : parseChunkSizedData size it = .success it' t) :
+    match t with
+    | .incomplete d _ => d.size ≥ 1
+    | .complete d => d.size = size := by
+  unfold parseChunkSizedData at h
+  simp only [bind, Std.Internal.Parsec.bind] at h
+  cases hf : parseFixedSizeData size it with
+  | error _ _ => rw [hf] at h; exact nomatch h
+  | success it₁ t₁ =>
+    rw [hf] at h
+    have := fixedSizeData_size hf
+    cases t₁ with
+    | complete d =>
+      simp only [SeqRight.seqRight, Std.Internal.Parsec.bind, pure, Std.Internal.Parsec.pure] at h
+      split at h
+      · injection h with _ h2
+        subst h2
+        exact this
+      · exact nomatch h
+    | incomplete d r =>
+      simp only [pure, Std.Internal.Parsec.pure] at h
+      injection h with _ h2
+      subst h2
+      exact this
+
+private theorem parseWith_some {α : Type} {machine : Machine dir} {parser : Parser α}
+    {limit expect : Option Nat} {onHardError : Std.Internal.Parsec.Error → H1.Error}
+    {machine' : Machine dir} {a : α}
+    (h : parseWith machine parser limit expect onHardError = (machine', some a)) :
+    ∃ it, parser machine.reader.input = .success it a ∧
+      machine' = { machine with reader := machine.reader.setInput it } := by
+  unfold parseWith at h
+  dsimp only at h
+  split at h
+  · next it a' heq =>
+    split at h
+    · split at h
+      · simp at h
+      · simp only [Prod.mk.injEq, Option.some.injEq] at h
+        obtain ⟨rfl, rfl⟩ := h
+        exact ⟨it, heq, rfl⟩
+    · simp only [Prod.mk.injEq, Option.some.injEq] at h
+      obtain ⟨rfl, rfl⟩ := h
+      exact ⟨it, heq, rfl⟩
+  all_goals
+    repeat' split at h
+    all_goals simp at h
+
+private theorem parseWith_config {α : Type} (machine : Machine dir) (parser : Parser α)
+    (limit expect : Option Nat) (onHardError : Std.Internal.Parsec.Error → H1.Error) :
+    (parseWith machine parser limit expect onHardError).1.config = machine.config := by
+  unfold parseWith
+  dsimp only
+  repeat' split
+  all_goals rfl
+
+private theorem emitBodyChunk_cont {machine : Machine dir} {nextState : Reader.State dir}
+    {final incomplete : Bool} {extensions : Array (Chunk.ExtensionName × Option Chunk.ExtensionValue)}
+    {data : ByteSlice} {closeBody : Bool}
+    (h : (emitBodyChunk machine nextState final incomplete extensions data closeBody).2.2 = true) :
+    (emitBodyChunk machine nextState final incomplete extensions data closeBody).1.reader.state = nextState ∧
+    (emitBodyChunk machine nextState final incomplete extensions data closeBody).1.config = machine.config ∧
+    (emitBodyChunk machine nextState final incomplete extensions data closeBody).1.reader.bodyBytesRead =
+      machine.reader.bodyBytesRead + data.size ∧
+    machine.reader.bodyBytesRead + data.size ≤ machine.config.maxBodySize := by
+  unfold emitBodyChunk at h ⊢
+  dsimp only at h ⊢
+  cases hfit : machine.fitsBodyLimit data.size with
+  | false => simp [hfit, bodyTooLarge] at h
+  | true =>
+    simp only [hfit, Bool.not_true, Bool.false_eq_true, ite_false] at h ⊢
+    simp only [fitsBodyLimit, decide_eq_true_eq] at hfit
+    cases closeBody <;>
+      simp [addBodyBytes, Reader.addBodyBytes, setReaderState, modifyReader, addEvent, hfit]
+
+private theorem bodyLeft_lt {machine machine' : Machine dir} {d : Nat} (hd : d ≥ 1)
+    (hc : machine'.config = machine.config)
+    (hb : machine'.reader.bodyBytesRead = machine.reader.bodyBytesRead + d)
+    (hfit : machine.reader.bodyBytesRead + d ≤ machine.config.maxBodySize) :
+    bodyLeft machine' < bodyLeft machine := by
+  simp only [bodyLeft, hc, hb]
+  omega
+
+private theorem parseBody_progress (machine : Machine dir) (bs : Reader.BodyState)
+    (h : (parseBody machine bs).2.2 = true) :
+    readerPhase (parseBody machine bs).1.reader.state = 0 ∨
+    (readerPhase (parseBody machine bs).1.reader.state = 1 ∧
+      headersLeft (parseBody machine bs).1 = 0 ∧
+      (bodyLeft (parseBody machine bs).1 < bodyLeft machine ∨
+        (bodyLeft (parseBody machine bs).1 = bodyLeft machine ∧
+          stateSub (parseBody machine bs).1.reader.state < bodySub bs))) := by
+  cases bs with
+  | fixed n =>
+    cases n with
+    | zero =>
+      have e : parseBody machine (.fixed 0) = parseFixedZeroBody machine := by simp [parseBody]
+      rw [e] at h ⊢
+      unfold parseFixedZeroBody at h ⊢
+      left
+      rw [(emitBodyChunk_cont h).1]
+      rfl
+    | succ n =>
+      have e : parseBody machine (.fixed (n + 1)) = parseFixedBody machine (n + 1) := by
+        simp [parseBody]
+      rw [e] at h ⊢
+      unfold parseFixedBody at h ⊢
+      generalize hp : parseWith machine (parseFixedSizeData (n + 1)) none (some (n + 1)) = r at h ⊢
+      rcases r with ⟨m', _ | t⟩
+      · simp [bodyNoProgress] at h
+      · obtain ⟨it, hit, rfl⟩ := parseWith_some hp
+        have hsz := fixedSizeData_size hit
+        cases t with
+        | complete d =>
+          simp only at h ⊢
+          left
+          rw [(emitBodyChunk_cont h).1]
+          rfl
+        | incomplete d rem =>
+          simp only at h ⊢
+          have hc := emitBodyChunk_cont h
+          right
+          refine ⟨by rw [hc.1]; rfl, by simp [headersLeft, hc.1], Or.inl ?_⟩
+          exact bodyLeft_lt hsz hc.2.1 (by simpa [Reader.setInput] using hc.2.2.1)
+            (by simpa [Reader.setInput] using hc.2.2.2)
+  | chunkedSize =>
+    have e : parseBody machine .chunkedSize = parseChunkSizeBody machine := by simp [parseBody]
+    rw [e] at h ⊢
+    unfold parseChunkSizeBody at h ⊢
+    generalize hp : parseWith machine (parseChunkSize machine.config)
+      (some machine.config.maxChunkLineLength) none = r at h ⊢
+    rcases r with ⟨m', _ | ⟨size, ext⟩⟩
+    · simp [bodyNoProgress] at h
+    · obtain ⟨it, _, rfl⟩ := parseWith_some hp
+      simp only at h ⊢
+      split
+      · simp_all [bodyTooLarge]
+      · split
+        · simp_all [bodyTooLarge]
+        · right
+          simp [setReaderState, modifyReader, readerPhase, headersLeft, bodyLeft, stateSub, bodySub,
+            Reader.setInput]
+  | chunkedBody ext n =>
+    cases n with
+    | zero =>
+      have e : parseBody machine (.chunkedBody ext 0) = parseLastChunkBodyState machine ext := by
+        simp [parseBody]
+      rw [e] at h ⊢
+      unfold parseLastChunkBodyState at h ⊢
+      generalize hp : parseWith machine (parseLastChunkBody machine.config) none none = r at h ⊢
+      rcases r with ⟨m', _ | u⟩
+      · simp [bodyNoProgress] at h
+      · simp only at h ⊢
+        left
+        rw [(emitBodyChunk_cont h).1]
+        rfl
+    | succ n =>
+      have e : parseBody machine (.chunkedBody ext (n + 1)) =
+          parseChunkedBodyState machine ext (n + 1) := by
+        simp [parseBody]
+      rw [e] at h ⊢
+      unfold parseChunkedBodyState at h ⊢
+      generalize hp : parseWith machine (parseChunkSizedData (n + 1)) none (some (n + 1)) = r at h ⊢
+      rcases r with ⟨m', _ | t⟩
+      · simp [bodyNoProgress] at h
+      · obtain ⟨it, hit, rfl⟩ := parseWith_some hp
+        have hsz := chunkSizedData_size hit
+        cases t with
+        | complete d =>
+          simp only at h ⊢
+          have hc := emitBodyChunk_cont h
+          right
+          refine ⟨by rw [hc.1]; rfl, by simp [headersLeft, hc.1], Or.inl ?_⟩
+          exact bodyLeft_lt (d := d.size) (by simp at hsz; omega) hc.2.1
+            (by simpa [Reader.setInput] using hc.2.2.1) (by simpa [Reader.setInput] using hc.2.2.2)
+        | incomplete d rem =>
+          simp only at h ⊢
+          have hc := emitBodyChunk_cont h
+          right
+          refine ⟨by rw [hc.1]; rfl, by simp [headersLeft, hc.1], Or.inl ?_⟩
+          exact bodyLeft_lt hsz hc.2.1 (by simpa [Reader.setInput] using hc.2.2.1)
+            (by simpa [Reader.setInput] using hc.2.2.2)
+  | closeDelimited =>
+    have e : parseBody machine .closeDelimited = parseCloseDelimitedBody machine := by simp [parseBody]
+    rw [e] at h ⊢
+    unfold parseCloseDelimitedBody at h ⊢
+    dsimp only at h ⊢
+    split
+    · next hend =>
+      split
+      · left
+        rw [(emitBodyChunk_cont (by simp_all)).1]
+        rfl
+      · simp_all [bodyNoProgress]
+    · next hend =>
+      rw [ite_eq_right_iff.mpr (fun hc => absurd hc hend)] at h
+      have hc := emitBodyChunk_cont h
+      right
+      refine ⟨by rw [hc.1]; rfl, by simp [headersLeft, hc.1], Or.inl ?_⟩
+      have hlt : machine.reader.input.pos < machine.reader.input.array.size := by
+        rcases hi : machine.reader.input with ⟨arr, i⟩
+        rw [hi] at hend
+        simp only [ByteArray.Iterator.atEnd, decide_eq_true_eq, Nat.not_le] at hend
+        exact hend
+      have hsz := size_slice machine.reader.input.array machine.reader.input.pos
+        machine.reader.input.array.size (by omega) (Nat.le_refl _)
+      exact bodyLeft_lt (d := (machine.reader.input.array[machine.reader.input.pos...
+        machine.reader.input.array.size] : ByteSlice).size) (by omega) hc.2.1
+        (by simpa [modifyReader, Reader.advance] using hc.2.2.1)
+        (by simpa [modifyReader, Reader.advance] using hc.2.2.2)
+
+private theorem advanceAfterHeaders_state (machine : Machine dir) (state : Reader.State dir) :
+    (advanceAfterHeaders machine state).reader.state =
+      if waitingContinueAfterHeaders machine then Reader.State.continue state else state := by
+  unfold advanceAfterHeaders
+  cases dir <;> rfl
+
+private theorem phase_after_mode (machine : Machine dir) (mode : BodyMode) :
+    readerPhase (advanceAfterHeaders (readerStateForMode machine mode).1
+      (readerStateForMode machine mode).2).reader.state ≤ 1 := by
+  rw [advanceAfterHeaders_state]
+  obtain ⟨bodyState, hbs⟩ : ∃ bodyState, (readerStateForMode machine mode).2 = .readBody bodyState := by
+    cases mode <;> exact ⟨_, rfl⟩
+  rw [hbs]
+  cases waitingContinueAfterHeaders (readerStateForMode machine mode).1 <;> simp [readerPhase]
+
+private theorem processHeaders_phase (machine : Machine dir) :
+    readerPhase (processHeaders machine).reader.state ≤ 1 := by
+  unfold processHeaders
+  dsimp only
+  split
+  · simp [setFailure, setReaderState, modifyReader, addEvent, setError, readerPhase]
+  · split
+    · simp [setFailure, setReaderState, modifyReader, addEvent, setError, readerPhase]
+    · exact phase_after_mode _ _
+
 /--
 Converts raw parsed header name/value strings into typed header representations.
 -/
@@ -1437,7 +1802,7 @@ mutual
 Parses one request start-line in server mode and initializes `reader.messageHead`
 for header parsing.
 -/
-private partial def processReceivingStartLine (machine : Machine .receiving) : Machine .receiving :=
+private def processReceivingStartLine (machine : Machine .receiving) : Machine .receiving :=
   let (machine, result) := parseWith machine
     (parseRequestLineRawVersion machine.config)
     (limit := some machine.config.maxStartLineLength)
@@ -1454,12 +1819,14 @@ private partial def processReceivingStartLine (machine : Machine .receiving) : M
     | _ => machine.setFailure .unsupportedVersion
   | none =>
     machine
+termination_by (3, 0, 0, 0, 1)
+decreasing_by all_goals (simp_wf; simp [setReaderState, modifyReader, readerPhase, Prod.lex_def])
 
 /--
 Parses one response start-line in client mode and initializes
 `reader.messageHead` for header parsing.
 -/
-private partial def processSendingStartLine (machine : Machine .sending) : Machine .sending :=
+private def processSendingStartLine (machine : Machine .sending) : Machine .sending :=
 
   let (machine, result) := parseWith machine
     (parseStatusLineRawVersion machine.config)
@@ -1483,6 +1850,8 @@ private partial def processSendingStartLine (machine : Machine .sending) : Machi
       machine.setFailure .unsupportedVersion
   | none =>
     machine
+termination_by (3, 0, 0, 0, 1)
+decreasing_by all_goals (simp_wf; simp [setReaderState, modifyReader, readerPhase, Prod.lex_def])
 
 /--
 Entry point for `Reader.State.needStartLine`.
@@ -1490,7 +1859,7 @@ Entry point for `Reader.State.needStartLine`.
 Requests more data when input is currently empty, closes on EOF, and otherwise
 dispatches to request-line/status-line parsing based on machine direction.
 -/
-private partial def processNeedStartLine (machine : Machine dir) : Machine dir :=
+private def processNeedStartLine (machine : Machine dir) : Machine dir :=
   let reader := machine.reader
 
   -- Closed connection, no more data
@@ -1504,6 +1873,8 @@ private partial def processNeedStartLine (machine : Machine dir) : Machine dir :
     match dir, machine with
     | .receiving, machine => processReceivingStartLine machine
     | .sending, machine => processSendingStartLine machine
+termination_by (3, 0, 0, 0, 2)
+decreasing_by all_goals (simp_wf; simp [Prod.lex_def])
 
 /--
 Processes a parsed header field line.
@@ -1511,7 +1882,7 @@ Processes a parsed header field line.
 Accounts for header byte/count limits, type-checks name/value pairs, appends
 header to `reader.messageHead`, and recurses into the next header slot.
 -/
-private partial def processParsedHeader (machine : Machine dir) (headerCount : Nat)
+private def processParsedHeader (machine : Machine dir) (headerCount : Nat)
     (startRemaining : Nat) (name : String) (value : String) : Machine dir :=
   let reader := machine.reader
   let headerBytes := startRemaining - reader.input.remainingBytes
@@ -1530,6 +1901,13 @@ private partial def processParsedHeader (machine : Machine dir) (headerCount : N
       |> processRead
     | none =>
       failBadMessage machine
+termination_by (2, machine.config.maxHeaders - headerCount, 0, 0, 1)
+decreasing_by
+  all_goals simp_wf
+  all_goals
+    simp only [setReaderState, modifyReader, readerPhase, headersLeft, Prod.lex_def, Nat.lt_irrefl,
+      false_or, true_and]
+    omega
 
 /--
 Consumes one header line in `needHeader` state.
@@ -1537,13 +1915,23 @@ Consumes one header line in `needHeader` state.
 On a regular field line it delegates to `processParsedHeader`; on an empty line
 it finalizes header processing via `processHeaders`.
 -/
-private partial def processNeedHeader (machine : Machine dir) (headerCount : Nat) : Machine dir :=
+private def processNeedHeader (machine : Machine dir) (headerCount : Nat) : Machine dir :=
   let start := machine.reader.input.remainingBytes
-  let (machine, result) := parseWith machine (parseSingleHeader machine.config) (limit := none)
+  match _hpw : parseWith machine (parseSingleHeader machine.config) (limit := none) with
+  | (machine, result) =>
   match result with
   | some (some (name, value)) => processParsedHeader machine headerCount start name value
   | some none => processHeaders machine |> processRead
   | none => machine
+termination_by (2, machine.config.maxHeaders - headerCount, 0, 0, 2)
+decreasing_by
+  all_goals simp_wf
+  · have hc := congrArg (fun r => r.1.config) _hpw
+    simp only [parseWith_config] at hc
+    simp [Prod.lex_def, ← hc]
+  · have := processHeaders_phase ‹Machine dir›
+    simp only [Prod.lex_def]
+    omega
 
 /--
 Reader-side handling for `.readBody`.
@@ -1551,7 +1939,7 @@ Reader-side handling for `.readBody`.
 When upper layers are not pulling body chunks, the machine drains body bytes
 internally to keep parsing/connection progress moving.
 -/
-private partial def processReadBodyState (machine : Machine dir) (bodyState : Reader.BodyState) : Machine dir :=
+private def processReadBodyState (machine : Machine dir) (bodyState : Reader.BodyState) : Machine dir :=
   -- Auto-drain when the body is internal (1xx responses on the client), or
   -- when the client is reading a response with known zero length: `.fixed 0`
   -- has no bytes to expose, so waiting for a caller `pullBody` would stall the
@@ -1561,16 +1949,28 @@ private partial def processReadBodyState (machine : Machine dir) (bodyState : Re
   let autoDrain := drainBodyInternally machine || (dir matches .sending ∧ bodyState matches .fixed 0)
 
   if autoDrain then
-    let (machine, _pulledChunk, shouldContinue) := parseBody machine bodyState
+    match _hpb : parseBody machine bodyState with
+    | (machine, _pulledChunk, shouldContinue) =>
     if shouldContinue then processRead machine else machine
   else
     machine
+termination_by (1, 0, bodyLeft machine, bodySub bodyState, 2)
+decreasing_by
+  all_goals simp_wf
+  have hp := parseBody_progress _ bodyState (by rw [_hpb]; assumption)
+  rw [_hpb] at hp
+  dsimp only at hp
+  simp only [Prod.lex_def]
+  rcases hp with hp | ⟨hp1, hp2, hp3 | ⟨hp3, hp4⟩⟩
+  · omega
+  · omega
+  · omega
 
 /--
 Handles `Reader.State.complete` by deciding whether to stay open for the next
 message or transition to `.closed`.
 -/
-private partial def processReaderCompleteState (machine : Machine dir) : Machine dir :=
+private def processReaderCompleteState (machine : Machine dir) : Machine dir :=
   let reader := machine.reader
   match dir, machine with
   | .sending, machine =>
@@ -1605,8 +2005,8 @@ Advances reader-side state machine by one logical transition.
 Dispatches parsing work according to current reader state (start-line, headers,
 body, completion, or failure handling).
 -/
-partial def processRead (machine : Machine dir) : Machine dir :=
-  match machine.reader.state with
+def processRead (machine : Machine dir) : Machine dir :=
+  match _h : machine.reader.state with
   | .pending =>
     if machine.isWriterClosed then
       machine.setReaderState .closed
@@ -1626,6 +2026,12 @@ partial def processRead (machine : Machine dir) : Machine dir :=
     machine
   | .failed error =>
     handleReaderFailed machine error
+termination_by (readerPhase machine.reader.state, headersLeft machine, bodyLeft machine,
+  stateSub machine.reader.state, 3)
+decreasing_by
+  all_goals simp_wf
+  all_goals simp [_h, readerPhase, headersLeft, stateSub, Prod.lex_def]
+  all_goals omega
 
 end
 
@@ -1644,10 +2050,11 @@ Internal recursive helper for `pullBody`.
 Keeps advancing body parsing until either a chunk is produced or no immediate
 progress can be made.
 -/
-private partial def pullNextChunk (machine : Machine dir) : Machine dir × Option PulledChunk :=
-  match machine.reader.state with
+private def pullNextChunk (machine : Machine dir) : Machine dir × Option PulledChunk :=
+  match _h : machine.reader.state with
   | .readBody bodyState =>
-    let (machine, pulledChunk, shouldContinue) := parseBody machine bodyState
+    match _hpb : parseBody machine bodyState with
+    | (machine, pulledChunk, shouldContinue) =>
     match pulledChunk with
     | some _ =>
       (machine, pulledChunk)
@@ -1658,6 +2065,16 @@ private partial def pullNextChunk (machine : Machine dir) : Machine dir × Optio
         (machine, none)
   | _ =>
     (machine, none)
+termination_by (readerPhase machine.reader.state, bodyLeft machine, stateSub machine.reader.state)
+decreasing_by
+  simp_wf
+  have hp := parseBody_progress _ bodyState (by rw [_hpb]; assumption)
+  rw [_hpb] at hp
+  dsimp only at hp
+  have e1 : readerPhase (Reader.State.readBody bodyState : Reader.State dir) = 1 := rfl
+  have e2 : stateSub (Reader.State.readBody bodyState : Reader.State dir) = bodySub bodyState := rfl
+  simp only [_h, e1, e2, Prod.lex_def]
+  rcases hp with hp | ⟨hp1, _, hp3 | ⟨hp3, hp4⟩⟩ <;> omega
 
 /--
 Pulls at most one body chunk from the reader.
