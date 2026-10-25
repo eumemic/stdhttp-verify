@@ -13,7 +13,7 @@ chunked-body   = *chunk last-chunk trailer-section CRLF
 
 `RequestBytes w h d`: `w` is one request message with head `h` whose body, delimited as RFC 9112
 §6.3 assigns from the head's Transfer-Encoding and Content-Length fields (`Framing.Assigns`),
-decodes to `d`. `Requests w`: `w` is a sequence of request messages.
+decodes to `d`. `Requests w n`: `w` is a sequence of `n` request messages.
 
 Two choices follow `Std.Http` and are documented where they are made: chunk-size lines use the
 grammar `Chunked.ChunkSizeLineL` (RFC plus whitespace after a value-less extension name), and the
@@ -81,16 +81,16 @@ def RequestBytes (w : List UInt8) (h : Head) (d : List UInt8) : Prop :=
     Assigns h.http10 (h.values "transfer-encoding") (h.values "content-length") body ∧
     BodyOf body bb d
 
-/-- A sequence of request messages. -/
-def Requests (w : List UInt8) : Prop :=
-  ∃ ms : List (List UInt8), w = ms.flatten ∧ ∀ x ∈ ms, ∃ h d, RequestBytes x h d
+/-- A sequence of `n` request messages. -/
+def Requests (w : List UInt8) (n : Nat) : Prop :=
+  ∃ ms : List (List UInt8), w = ms.flatten ∧ ms.length = n ∧ ∀ x ∈ ms, ∃ h d, RequestBytes x h d
 
-theorem requests_nil : Requests [] := ⟨[], rfl, by simp⟩
+theorem requests_nil : Requests [] 0 := ⟨[], rfl, rfl, by simp⟩
 
-theorem requests_snoc {w m : List UInt8} {h : Head} {d : List UInt8} (hw : Requests w)
-    (hm : RequestBytes m h d) : Requests (w ++ m) := by
-  obtain ⟨ms, rfl, hall⟩ := hw
-  refine ⟨ms ++ [m], by simp, ?_⟩
+theorem requests_snoc {w m : List UInt8} {n : Nat} {h : Head} {d : List UInt8} (hw : Requests w n)
+    (hm : RequestBytes m h d) : Requests (w ++ m) (n + 1) := by
+  obtain ⟨ms, rfl, rfl, hall⟩ := hw
+  refine ⟨ms ++ [m], by simp, by simp, ?_⟩
   intro x hx
   rcases List.mem_append.mp hx with hx | hx
   · exact hall x hx

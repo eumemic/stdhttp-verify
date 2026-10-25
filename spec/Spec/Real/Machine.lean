@@ -5,9 +5,11 @@ import Spec.MultiMap
 /-!
 # The receiving machine reads RFC 9112 requests
 
-An invariant of `Std.Http.Protocol.H1.Machine .receiving`: the bytes the reader has consumed are a
-sequence of complete request messages (`Message.Requests`) followed by a prefix of the next one
-that matches the reader's state, and the head the machine has recorded is that message's head.
+An invariant of `Std.Http.Protocol.H1.Machine .receiving`: the bytes the reader has consumed are
+complete request messages (`Message.Requests`), as many as the reader has counted, followed by a
+prefix of the next one that matches the reader's state, and the head the machine has recorded is
+that message's head (`reads_requests`). Once the reader has rejected its input or closed, it stays
+so and accepts no more bytes (`nothing_after_rejection`).
 -/
 
 open Std.Http Std.Http.Protocol.H1 Std.Http.Internal
@@ -138,19 +140,19 @@ the next request that the reader's state says it has read, and the recorded head
 request's head. Once the reader has failed or closed it reads nothing more. -/
 def Ok (m : Machine .receiving) (c : List UInt8) : Prop :=
   match m.reader.state with
-  | .needStartLine => Requests c
-  | .needHeader j => ∃ p q h, c = p ++ q ∧ Requests p ∧ HeadPrefix q h ∧ h.fields.length = j ∧
+  | .needStartLine => Requests c m.reader.messageCount
+  | .needHeader j => ∃ p q h, c = p ++ q ∧ Requests p m.reader.messageCount ∧ HeadPrefix q h ∧ h.fields.length = j ∧
       Recorded m.reader.messageHead h
-  | .readBody bs => ∃ p hb h b body, c = p ++ hb ++ b ∧ Requests p ∧ HeadBytes hb h ∧
+  | .readBody bs => ∃ p hb h b body, c = p ++ hb ++ b ∧ Requests p m.reader.messageCount ∧ HeadBytes hb h ∧
       Recorded m.reader.messageHead h ∧
       Assigns h.http10 (h.values "transfer-encoding") (h.values "content-length") body ∧
       BodyProgress body bs b
-  | .continue (.readBody bs) => ∃ p hb h body, c = p ++ hb ∧ Requests p ∧ HeadBytes hb h ∧
+  | .continue (.readBody bs) => ∃ p hb h body, c = p ++ hb ∧ Requests p m.reader.messageCount ∧ HeadBytes hb h ∧
       Recorded m.reader.messageHead h ∧
       Assigns h.http10 (h.values "transfer-encoding") (h.values "content-length") body ∧
       BodyProgress body bs []
   | .continue _ => False
-  | .complete => ∃ p r h d, c = p ++ r ∧ Requests p ∧ RequestBytes r h d
+  | .complete => ∃ p r h d, c = p ++ r ∧ Requests p m.reader.messageCount ∧ RequestBytes r h d
   | .pending => True
   | .closed => True
   | .failed _ => True
@@ -161,9 +163,9 @@ def Inv (m : Machine .receiving) (s : List UInt8) : Prop :=
 
 theorem ok_congr {m m' : Machine .receiving} {c : List UInt8}
     (hs : m'.reader.state = m.reader.state) (hh : m'.reader.messageHead = m.reader.messageHead)
-    (h : Ok m c) : Ok m' c := by
+    (hn : m'.reader.messageCount = m.reader.messageCount) (h : Ok m c) : Ok m' c := by
   unfold Ok at h ⊢
-  rw [hs, hh]
+  rw [hs, hh, hn]
   exact h
 
 theorem ok_failed {m : Machine .receiving} {c : List UInt8} {e} (h : m.reader.state = .failed e) :
@@ -248,7 +250,7 @@ theorem recorded_start {method : Method} {uri : RequestTarget} {v : Version} {mt
 /-- Reading a request line from `needStartLine` (the case `processReceivingStartLine` continues
 with). -/
 theorem startLine_step {m m1 : Machine .receiving} {c : List UInt8} {method : Method}
-    {uri : RequestTarget} {v : Version} (hib : InBounds m) (hok : Requests c)
+    {uri : RequestTarget} {v : Version} (hib : InBounds m) (hok : Requests c m.reader.messageCount)
     (hpw : m.parseWith (parseRequestLineRawVersion m.config) (some m.config.maxStartLineLength) none
       Machine.classifyStartLineHardError = (m1, some (method, uri, some v)))
     (hv : v = .v11 ∨ v = .v10) :
@@ -368,10 +370,11 @@ theorem checkReceiving_ok {mh : Protocol.H1.Message.Head .receiving} {mode : Mac
 
 theorem advanceAfterHeaders_reader (M : Machine .receiving) (st : Reader.State .receiving) :
     (M.advanceAfterHeaders st).reader.input = M.reader.input ∧
-      (M.advanceAfterHeaders st).reader.messageHead = M.reader.messageHead := by
+      (M.advanceAfterHeaders st).reader.messageHead = M.reader.messageHead ∧
+      (M.advanceAfterHeaders st).reader.messageCount = M.reader.messageCount := by
   simp [Machine.advanceAfterHeaders, Machine.setReaderState, Machine.modifyReader,
     Machine.setWriterState, Machine.modifyWriter, Machine.addEvent]
-  split <;> exact ⟨rfl, rfl⟩
+  split <;> exact ⟨rfl, rfl, rfl⟩
 
 theorem readerStateForMode_fst (M : Machine .receiving) (mode : Machine.BodyMode) :
     (M.readerStateForMode mode).1.reader = M.reader := by
@@ -380,6 +383,7 @@ theorem readerStateForMode_fst (M : Machine .receiving) (mode : Machine.BodyMode
 theorem processHeaders_reader (m : Machine .receiving) :
     (Machine.processHeaders m).reader.input = m.reader.input ∧
     (Machine.processHeaders m).reader.messageHead = m.reader.messageHead ∧
+    (Machine.processHeaders m).reader.messageCount = m.reader.messageCount ∧
     ((∃ e, (Machine.processHeaders m).reader.state = .failed e) ∨
       ∃ b, Protocol.H1.Message.Head.getSize (dir := .receiving) m.reader.messageHead true = some b ∧
         ((Machine.processHeaders m).reader.state = .readBody (initBody b) ∨
@@ -400,7 +404,8 @@ theorem processHeaders_reader (m : Machine .receiving) :
       simp only [Machine.exceedsBodyLimitForMode, Machine.suppressIncomingBodyIfHead, Bool.false_eq_true,
         ite_false]
       refine ⟨by rw [(advanceAfterHeaders_reader _ _).1, readerStateForMode_fst],
-        by rw [(advanceAfterHeaders_reader _ _).2, readerStateForMode_fst], Or.inr ⟨_, hb, ?_⟩⟩
+        by rw [(advanceAfterHeaders_reader _ _).2.1, readerStateForMode_fst],
+        by rw [(advanceAfterHeaders_reader _ _).2.2, readerStateForMode_fst], Or.inr ⟨_, hb, ?_⟩⟩
       rw [Machine.advanceAfterHeaders_state]
       exact hcont _ _
     | fixed n =>
@@ -410,7 +415,8 @@ theorem processHeaders_reader (m : Machine .receiving) :
           Machine.setError]
       · simp only [hn, decide_false, Bool.false_eq_true, ite_false]
         refine ⟨by rw [(advanceAfterHeaders_reader _ _).1, readerStateForMode_fst],
-          by rw [(advanceAfterHeaders_reader _ _).2, readerStateForMode_fst], Or.inr ⟨_, hb, ?_⟩⟩
+          by rw [(advanceAfterHeaders_reader _ _).2.1, readerStateForMode_fst],
+        by rw [(advanceAfterHeaders_reader _ _).2.2, readerStateForMode_fst], Or.inr ⟨_, hb, ?_⟩⟩
         rw [Machine.advanceAfterHeaders_state]
         exact hcont _ _
 
@@ -429,7 +435,7 @@ theorem endHeaders_step {m m1 : Machine .receiving} {c : List UInt8} {j : Nat}
   obtain ⟨it, hit, rfl⟩ := Machine.parseWith_some hpw
   obtain ⟨hib', w, hw, hcrlf⟩ := consume (sound_parseSingleHeader _) hib hit
   simp only at hcrlf
-  obtain ⟨hin, hmh, hcases⟩ := processHeaders_reader { m with reader := m.reader.setInput it }
+  obtain ⟨hin, hmh, hmc, hcases⟩ := processHeaders_reader { m with reader := m.reader.setInput it }
   unfold Ok at hok
   rw [hst] at hok
   obtain ⟨p, q, h, rfl, hp, ⟨rl, fl, rfl, hrl, hfl⟩, _, hrec⟩ := hok
@@ -447,13 +453,14 @@ theorem endHeaders_step {m m1 : Machine .receiving} {c : List UInt8} {j : Nat}
         simpa [Reader.setInput] using hb
       unfold Ok
       rw [hs]
-      exact ⟨p, rl ++ fl ++ CRLF, h, [], toBody b, by simp, hp, hhb, hrec',
+      exact ⟨p, rl ++ fl ++ CRLF, h, [], toBody b, by simp, by rw [hmc]; exact hp, hhb, hrec',
         getSize_recorded hrec hb', bodyProgress_init b⟩
     · have hb' : Protocol.H1.Message.Head.getSize (dir := .receiving) m.reader.messageHead true = some b := by
         simpa [Reader.setInput] using hb
       unfold Ok
       rw [hs]
-      exact ⟨p, rl ++ fl ++ CRLF, h, toBody b, rfl, hp, hhb, hrec', getSize_recorded hrec hb',
+      exact ⟨p, rl ++ fl ++ CRLF, h, toBody b, rfl, by rw [hmc]; exact hp, hhb, hrec',
+        getSize_recorded hrec hb',
         bodyProgress_init b⟩
 
 /-! ## Body steps -/
@@ -461,12 +468,13 @@ theorem endHeaders_step {m m1 : Machine .receiving} {c : List UInt8} {j : Nat}
 /-- A step that consumed nothing and either left the reader as it was or failed it. -/
 def Stays (m m' : Machine .receiving) : Prop :=
   m'.reader.input = m.reader.input ∧ m'.reader.messageHead = m.reader.messageHead ∧
+    m'.reader.messageCount = m.reader.messageCount ∧
     (m'.reader.state = m.reader.state ∨ ∃ e, m'.reader.state = .failed e)
 
 theorem stays_inv {m m' : Machine .receiving} {c : List UInt8} (h : Stays m m') (hib : InBounds m)
     (hok : Ok m c) : InBounds m' ∧ ∃ c', c ++ rem m = c' ++ rem m' ∧ Ok m' c' := by
-  obtain ⟨hin, hmh, hs | ⟨e, he⟩⟩ := h
-  · refine ⟨by unfold InBounds; rw [hin]; exact hib, c, by simp [rem, hin], ok_congr hs hmh hok⟩
+  obtain ⟨hin, hmh, hmc, hs | ⟨e, he⟩⟩ := h
+  · refine ⟨by unfold InBounds; rw [hin]; exact hib, c, by simp [rem, hin], ok_congr hs hmh hmc hok⟩
   · exact ⟨by unfold InBounds; rw [hin]; exact hib, c, by simp [rem, hin], ok_failed he⟩
 
 theorem parseWith_none {α : Type} {m : Machine .receiving}
@@ -495,6 +503,8 @@ theorem emitBodyChunk_cases (m : Machine .receiving) (ns : Reader.State .receivi
     (m.emitBodyChunk ns final incomplete ext data closeBody).1.reader.input = m.reader.input ∧
     (m.emitBodyChunk ns final incomplete ext data closeBody).1.reader.messageHead =
       m.reader.messageHead ∧
+    (m.emitBodyChunk ns final incomplete ext data closeBody).1.reader.messageCount =
+      m.reader.messageCount ∧
     ((m.emitBodyChunk ns final incomplete ext data closeBody).1.reader.state = ns ∨
       ∃ e, (m.emitBodyChunk ns final incomplete ext data closeBody).1.reader.state = .failed e) := by
   unfold Machine.emitBodyChunk
@@ -505,7 +515,7 @@ theorem emitBodyChunk_cases (m : Machine .receiving) (ns : Reader.State .receivi
       Machine.addEvent, Machine.setError, Machine.addBodyBytes, Reader.addBodyBytes]
 
 theorem body_cont {m' : Machine .receiving} {p hb b' : List UInt8} {h : Head} {body : Body}
-    {bs' : Reader.BodyState} (hs : m'.reader.state = .readBody bs') (hp : Requests p)
+    {bs' : Reader.BodyState} (hs : m'.reader.state = .readBody bs') (hp : Requests p m'.reader.messageCount)
     (hhb : HeadBytes hb h) (hrec : Recorded m'.reader.messageHead h)
     (has : Assigns h.http10 (h.values "transfer-encoding") (h.values "content-length") body)
     (hprog : BodyProgress body bs' b') : Ok m' (p ++ hb ++ b') := by
@@ -514,7 +524,7 @@ theorem body_cont {m' : Machine .receiving} {p hb b' : List UInt8} {h : Head} {b
   exact ⟨p, hb, h, b', body, rfl, hp, hhb, hrec, has, hprog⟩
 
 theorem body_done {m' : Machine .receiving} {p hb b' d : List UInt8} {h : Head} {body : Body}
-    (hs : m'.reader.state = .complete) (hp : Requests p) (hhb : HeadBytes hb h)
+    (hs : m'.reader.state = .complete) (hp : Requests p m'.reader.messageCount) (hhb : HeadBytes hb h)
     (has : Assigns h.http10 (h.values "transfer-encoding") (h.values "content-length") body)
     (hbody : BodyOf body b' d) : Ok m' (p ++ hb ++ b') := by
   unfold Ok
@@ -524,7 +534,7 @@ theorem body_done {m' : Machine .receiving} {p hb b' d : List UInt8} {h : Head} 
 /-- The facts `Ok` gives in a body state. -/
 theorem ok_readBody {m : Machine .receiving} {c : List UInt8} {bs : Reader.BodyState}
     (hst : m.reader.state = .readBody bs) (hok : Ok m c) :
-    ∃ p hb h b body, c = p ++ hb ++ b ∧ Requests p ∧ HeadBytes hb h ∧
+    ∃ p hb h b body, c = p ++ hb ++ b ∧ Requests p m.reader.messageCount ∧ HeadBytes hb h ∧
       Recorded m.reader.messageHead h ∧
       Assigns h.http10 (h.values "transfer-encoding") (h.values "content-length") body ∧
       BodyProgress body bs b := by
@@ -540,12 +550,12 @@ theorem fixedZero_step {m : Machine .receiving} {c : List UInt8} (hib : InBounds
   have e : m.parseBody (.fixed 0) = m.parseFixedZeroBody := by simp [Machine.parseBody]
   rw [e]
   unfold Machine.parseFixedZeroBody
-  obtain ⟨hin, hmh, hs | ⟨er, he⟩⟩ := emitBodyChunk_cases m .complete true false #[] .empty true
+  obtain ⟨hin, hmh, hmc, hs | ⟨er, he⟩⟩ := emitBodyChunk_cases m .complete true false #[] .empty true
   · refine ⟨by unfold InBounds; rw [hin]; exact hib, p ++ hb ++ b, by simp [rem, hin], ?_⟩
     cases body with
     | length n =>
       simp only [BodyProgress] at hprog
-      exact body_done hs hp hhb has ⟨by omega, rfl⟩
+      exact body_done hs (by rw [hmc]; exact hp) hhb has ⟨by omega, rfl⟩
     | chunked => simp [BodyProgress] at hprog
   · exact ⟨by unfold InBounds; rw [hin]; exact hib, p ++ hb ++ b, by simp [rem, hin], ok_failed he⟩
 
@@ -575,28 +585,28 @@ theorem fixed_step {m : Machine .receiving} {c : List UInt8} {r : Nat} (hib : In
     | complete d =>
       obtain ⟨rfl, hlen⟩ := hP
       simp only
-      obtain ⟨hin, hmh, hs | ⟨er, he⟩⟩ := emitBodyChunk_cases { m with reader := m.reader.setInput it }
+      obtain ⟨hin, hmh, hmc, hs | ⟨er, he⟩⟩ := emitBodyChunk_cases { m with reader := m.reader.setInput it }
         .complete true false #[] d true
       · refine ⟨by unfold InBounds at hib' ⊢; rw [hin]; exact hib', p ++ hb ++ (b ++ sliceBytes d),
           by rw [hw]; simp [rem, hin], ?_⟩
         cases body with
         | length n =>
           simp only [BodyProgress] at hprog
-          exact body_done hs hp hhb has ⟨by simp; omega, rfl⟩
+          exact body_done hs (by rw [hmc]; exact hp) hhb has ⟨by simp; omega, rfl⟩
         | chunked => simp [BodyProgress] at hprog
       · exact ⟨by unfold InBounds at hib' ⊢; rw [hin]; exact hib', p ++ hb ++ (b ++ sliceBytes d),
           by rw [hw]; simp [rem, hin], ok_failed he⟩
     | incomplete d rm =>
       obtain ⟨rfl, _, _, hlen⟩ := hP
       simp only
-      obtain ⟨hin, hmh, hs | ⟨er, he⟩⟩ := emitBodyChunk_cases { m with reader := m.reader.setInput it }
+      obtain ⟨hin, hmh, hmc, hs | ⟨er, he⟩⟩ := emitBodyChunk_cases { m with reader := m.reader.setInput it }
         (.readBody (.fixed rm)) false false #[] d false
       · refine ⟨by unfold InBounds at hib' ⊢; rw [hin]; exact hib', p ++ hb ++ (b ++ sliceBytes d),
           by rw [hw]; simp [rem, hin], ?_⟩
         cases body with
         | length n =>
           simp only [BodyProgress] at hprog
-          refine body_cont hs hp hhb (by rw [hmh]; exact rec_setInput hrec) has ?_
+          refine body_cont hs (by rw [hmc]; exact hp) hhb (by rw [hmh]; exact rec_setInput hrec) has ?_
           simp only [BodyProgress, List.length_append]
           omega
         | chunked => simp [BodyProgress] at hprog
@@ -675,7 +685,7 @@ theorem lastChunk_step {m : Machine .receiving} {c : List UInt8}
   · obtain ⟨it, hit, rfl⟩ := Machine.parseWith_some hpw
     obtain ⟨hib', w, hw, htr⟩ := consume (sound_parseLastChunkBody _) hib hit
     simp only
-    obtain ⟨hin, hmh, hs | ⟨er, he⟩⟩ := emitBodyChunk_cases { m with reader := m.reader.setInput it }
+    obtain ⟨hin, hmh, hmc, hs | ⟨er, he⟩⟩ := emitBodyChunk_cases { m with reader := m.reader.setInput it }
       .complete true false ext .empty true
     · refine ⟨by unfold InBounds at hib' ⊢; rw [hin]; exact hib', p ++ hb ++ (b ++ w),
         by rw [hw]; simp [rem, hin], ?_⟩
@@ -684,7 +694,7 @@ theorem lastChunk_step {m : Machine .receiving} {c : List UInt8}
       | chunked =>
         simp only [BodyProgress] at hprog
         obtain ⟨cs, line, pd, size, d, rfl, hcs, hline, ⟨rfl, rfl, _⟩ | ⟨_, h1, _⟩⟩ := hprog
-        · exact body_done hs hp hhb has ⟨cs, line, w, by simp, hcs, hline, trailerSection_of htr⟩
+        · exact body_done hs (by rw [hmc]; exact hp) hhb has ⟨cs, line, w, by simp, hcs, hline, trailerSection_of htr⟩
         · omega
     · exact ⟨by unfold InBounds at hib' ⊢; rw [hin]; exact hib', p ++ hb ++ (b ++ w),
         by rw [hw]; simp [rem, hin], ok_failed he⟩
@@ -718,11 +728,11 @@ theorem chunkData_step {m : Machine .receiving} {c : List UInt8}
     | complete dd =>
       obtain ⟨rfl, hlen⟩ := hP
       simp only
-      obtain ⟨hin, hmh, hs | ⟨er, he⟩⟩ := emitBodyChunk_cases { m with reader := m.reader.setInput it }
+      obtain ⟨hin, hmh, hmc, hs | ⟨er, he⟩⟩ := emitBodyChunk_cases { m with reader := m.reader.setInput it }
         (.readBody .chunkedSize) false false ext dd false
       · refine ⟨by unfold InBounds at hib' ⊢; rw [hin]; exact hib',
           p ++ hb ++ (cs ++ line ++ pd ++ (sliceBytes dd ++ CRLF)), by rw [hw]; simp [rem, hin], ?_⟩
-        refine body_cont hs hp hhb (by rw [hmh]; exact rec_setInput hrec) has ?_
+        refine body_cont hs (by rw [hmc]; exact hp) hhb (by rw [hmh]; exact rec_setInput hrec) has ?_
         refine ⟨d ++ (pd ++ sliceBytes dd), ?_⟩
         have := Message.Chunks.snoc (data := pd ++ sliceBytes dd) hcs hline hsz (by simp; omega)
         simpa using this
@@ -732,11 +742,11 @@ theorem chunkData_step {m : Machine .receiving} {c : List UInt8}
     | incomplete dd rm =>
       obtain ⟨rfl, _, hrm, hlen⟩ := hP
       simp only
-      obtain ⟨hin, hmh, hs | ⟨er, he⟩⟩ := emitBodyChunk_cases { m with reader := m.reader.setInput it }
+      obtain ⟨hin, hmh, hmc, hs | ⟨er, he⟩⟩ := emitBodyChunk_cases { m with reader := m.reader.setInput it }
         (.readBody (.chunkedBody ext rm)) false true ext dd false
       · refine ⟨by unfold InBounds at hib' ⊢; rw [hin]; exact hib',
           p ++ hb ++ (cs ++ line ++ pd ++ sliceBytes dd), by rw [hw]; simp [rem, hin], ?_⟩
-        refine body_cont hs hp hhb (by rw [hmh]; exact rec_setInput hrec) has ?_
+        refine body_cont hs (by rw [hmc]; exact hp) hhb (by rw [hmh]; exact rec_setInput hrec) has ?_
         refine ⟨cs, line, pd ++ sliceBytes dd, size, d, by simp, hcs, hline, Or.inr ⟨hsz, hrm, ?_⟩⟩
         simp only [List.length_append]
         omega
@@ -796,14 +806,15 @@ def M6 : (dir : Direction) → Machine dir → Prop
 /-- The reader keeps its input and head, and its state is unchanged, closed or failed. -/
 def ROK (m m' : Machine .receiving) : Prop :=
   m'.reader.input = m.reader.input ∧ m'.reader.messageHead = m.reader.messageHead ∧
+    m'.reader.messageCount = m.reader.messageCount ∧
     (m'.reader.state = m.reader.state ∨ m'.reader.state = .closed ∨ ∃ e, m'.reader.state = .failed e)
 
-theorem rok_refl (m : Machine .receiving) : ROK m m := ⟨rfl, rfl, Or.inl rfl⟩
+theorem rok_refl (m : Machine .receiving) : ROK m m := ⟨rfl, rfl, rfl, Or.inl rfl⟩
 
 theorem rok_trans {a b c : Machine .receiving} (h1 : ROK a b) (h2 : ROK b c) : ROK a c := by
-  obtain ⟨i1, m1, s1⟩ := h1
-  obtain ⟨i2, m2, s2⟩ := h2
-  refine ⟨by rw [i2, i1], by rw [m2, m1], ?_⟩
+  obtain ⟨i1, m1, c1, s1⟩ := h1
+  obtain ⟨i2, m2, c2, s2⟩ := h2
+  refine ⟨by rw [i2, i1], by rw [m2, m1], by rw [c2, c1], ?_⟩
   rcases s2 with s2 | s2 | ⟨e, s2⟩
   · rw [s2]; exact s1
   · exact Or.inr (Or.inl s2)
@@ -812,16 +823,16 @@ theorem rok_trans {a b c : Machine .receiving} (h1 : ROK a b) (h2 : ROK b c) : R
 theorem rok_pres {m m' : Machine .receiving} (h : ROK m m') : ∀ c, InBounds m → Ok m c →
     InBounds m' ∧ ∃ c', c ++ rem m = c' ++ rem m' ∧ Ok m' c' := by
   intro c hib hok
-  obtain ⟨hin, hmh, hs | hs | ⟨e, hs⟩⟩ := h
-  · exact ⟨by unfold InBounds; rw [hin]; exact hib, c, by simp [rem, hin], ok_congr hs hmh hok⟩
+  obtain ⟨hin, hmh, hmc, hs | hs | ⟨e, hs⟩⟩ := h
+  · exact ⟨by unfold InBounds; rw [hin]; exact hib, c, by simp [rem, hin], ok_congr hs hmh hmc hok⟩
   · exact ⟨by unfold InBounds; rw [hin]; exact hib, c, by simp [rem, hin], ok_closed hs⟩
   · exact ⟨by unfold InBounds; rw [hin]; exact hib, c, by simp [rem, hin], ok_failed hs⟩
 
 theorem rok_setFailure (m : Machine .receiving) (e : Protocol.H1.Error) : ROK m (m.setFailure e) :=
-  ⟨rfl, rfl, Or.inr (Or.inr ⟨e, rfl⟩)⟩
+  ⟨rfl, rfl, rfl, Or.inr (Or.inr ⟨e, rfl⟩)⟩
 
 theorem rok_of_reader {m m' : Machine .receiving} (h : m'.reader = m.reader) : ROK m m' := by
-  refine ⟨by rw [h], by rw [h], Or.inl (by rw [h])⟩
+  refine ⟨by rw [h], by rw [h], by rw [h], Or.inl (by rw [h])⟩
 
 theorem rok_ite {c : Prop} [Decidable c] {m a b : Machine .receiving} (ha : ROK m a) (hb : ROK m b) :
     ROK m (if c then a else b) := by
@@ -858,8 +869,9 @@ theorem rok_send (m : Machine .receiving) (h : Protocol.H1.Message.Head Directio
       exact rok_ite h1 (rok_trans h1 (rok_of_reader rfl))
 
 theorem rok_closed {m m' : Machine .receiving} (hi : m'.reader.input = m.reader.input)
-    (hh : m'.reader.messageHead = m.reader.messageHead) (hs : m'.reader.state = .closed) : ROK m m' :=
-  ⟨hi, hh, Or.inr (Or.inl hs)⟩
+    (hh : m'.reader.messageHead = m.reader.messageHead)
+    (hc : m'.reader.messageCount = m.reader.messageCount) (hs : m'.reader.state = .closed) : ROK m m' :=
+  ⟨hi, hh, hc, Or.inr (Or.inl hs)⟩
 
 theorem rok_handleReaderFailed (m : Machine .receiving) (e : Protocol.H1.Error) :
     ROK m (m.handleReaderFailed e) := by
@@ -873,15 +885,16 @@ theorem rok_handleReaderFailed (m : Machine .receiving) (e : Protocol.H1.Error) 
     have b := rok_send (m.setWriterState .waitingHeaders).disableKeepAlive
       { status := Machine.errorResponseStatus e }
     exact rok_trans (rok_trans a b) (rok_of_reader rfl)
-  obtain ⟨hi, hh, _⟩ := hM
+  obtain ⟨hi, hh, hc, _⟩ := hM
   exact rok_closed (by simpa [Machine.setReaderState, Machine.modifyReader, Machine.setError] using hi)
     (by simpa [Machine.setReaderState, Machine.modifyReader, Machine.setError] using hh)
+    (by simpa [Machine.setReaderState, Machine.modifyReader, Machine.setError] using hc)
     (by simp [Machine.setReaderState, Machine.modifyReader, Machine.setError])
 
 theorem rok_completeState (m : Machine .receiving) : ROK m m.processReaderCompleteState := by
   unfold Machine.processReaderCompleteState
   dsimp only
-  exact rok_ite (rok_closed rfl rfl rfl) (rok_refl m)
+  exact rok_ite (rok_closed rfl rfl rfl rfl) (rok_refl m)
 
 /-! ### One step of each function, by case -/
 
@@ -908,7 +921,7 @@ theorem processRead_pres (m : Machine .receiving) : Pres Machine.processRead m :
         (Reader.setMessageHead { method, version := .v11, uri })).setReaderState (.needHeader 0)) := by
       rw [Machine.processReceivingStartLine]; simp only [hpw]
     rw [e]
-    have hc : Requests c := by unfold Ok at hok; rw [hst] at hok; exact hok
+    have hc : Requests c machine.reader.messageCount := by unfold Ok at hok; rw [hst] at hok; exact hok
     obtain ⟨hib2, c2, hc2, hok2⟩ := startLine_step hib hc hpw (Or.inl rfl)
     obtain ⟨hib3, c3, hc3, hok3⟩ := ih c2 hib2 hok2
     exact ⟨hib3, c3, by rw [hc2, hc3], hok3⟩
@@ -918,7 +931,7 @@ theorem processRead_pres (m : Machine .receiving) : Pres Machine.processRead m :
         (Reader.setMessageHead { method, version := .v10, uri })).setReaderState (.needHeader 0)) := by
       rw [Machine.processReceivingStartLine]; simp only [hpw]
     rw [e]
-    have hc : Requests c := by unfold Ok at hok; rw [hst] at hok; exact hok
+    have hc : Requests c machine.reader.messageCount := by unfold Ok at hok; rw [hst] at hok; exact hok
     obtain ⟨hib2, c2, hc2, hok2⟩ := startLine_step hib hc hpw (Or.inr rfl)
     obtain ⟨hib3, c3, hc3, hok3⟩ := ih c2 hib2 hok2
     exact ⟨hib3, c3, by rw [hc2, hc3], hok3⟩
@@ -949,7 +962,7 @@ theorem processRead_pres (m : Machine .receiving) : Pres Machine.processRead m :
     · intro c hib hok
       rcases (processRead_cases machine).2.2.2.2.2.2.2 hst with e | e <;> rw [e]
       · exact ⟨hib, c, rfl, hok⟩
-      · exact rok_pres (m := machine) (m' := machine.setReaderState .closed) (rok_closed rfl rfl rfl) c hib hok
+      · exact rok_pres (m := machine) (m' := machine.setReaderState .closed) (rok_closed rfl rfl rfl rfl) c hib hok
     · trivial
   -- pending, writer open
   · intro dir machine hst hw
@@ -957,7 +970,7 @@ theorem processRead_pres (m : Machine .receiving) : Pres Machine.processRead m :
     · intro c hib hok
       rcases (processRead_cases machine).2.2.2.2.2.2.2 hst with e | e <;> rw [e]
       · exact ⟨hib, c, rfl, hok⟩
-      · exact rok_pres (m := machine) (m' := machine.setReaderState .closed) (rok_closed rfl rfl rfl) c hib hok
+      · exact rok_pres (m := machine) (m' := machine.setReaderState .closed) (rok_closed rfl rfl rfl rfl) c hib hok
     · trivial
   -- needStartLine
   · intro dir machine hst ih
@@ -1171,7 +1184,7 @@ theorem processRead_pres (m : Machine .receiving) : Pres Machine.processRead m :
       have e : machine.processNeedStartLine = machine.setReaderState .closed := by
         unfold Machine.processNeedStartLine; simp only [reader] at hend; simp [hend]
       rw [e]
-      exact rok_pres (m := machine) (m' := machine.setReaderState .closed) (rok_closed rfl rfl rfl) c hib hok
+      exact rok_pres (m := machine) (m' := machine.setReaderState .closed) (rok_closed rfl rfl rfl rfl) c hib hok
     · intros; trivial
   -- no input yet
   · intro dir machine
@@ -1195,19 +1208,38 @@ theorem processRead_pres (m : Machine .receiving) : Pres Machine.processRead m :
 
 /-! ## The write loop -/
 
-/-- Going from `m` to `m'` preserves the invariant. -/
-def Pres2 (m m' : Machine .receiving) : Prop :=
-  ∀ c, InBounds m → Ok m c → InBounds m' ∧ ∃ c', c ++ rem m = c' ++ rem m' ∧ Ok m' c'
+/-- The reader has rejected its input (`failed`) or closed. -/
+def Dead (m : Machine .receiving) : Prop :=
+  m.reader.state = .closed ∨ ∃ e, m.reader.state = .failed e
 
-theorem pres2_refl (m : Machine .receiving) : Pres2 m m := fun c hib hok => ⟨hib, c, rfl, hok⟩
+theorem dead_of_rok {m m' : Machine .receiving} (h : ROK m m') (hd : Dead m) : Dead m' := by
+  obtain ⟨-, -, -, hs | hs | hs⟩ := h
+  · unfold Dead; rw [hs]; exact hd
+  · exact Or.inl hs
+  · exact Or.inr hs
+
+theorem not_dead {m : Machine .receiving} {st : Reader.State .receiving} (hs : m.reader.state = st)
+    (hc : st ≠ .closed) (hf : ∀ e, st ≠ .failed e) : ¬ Dead m := by
+  rintro (h | ⟨e, h⟩)
+  · exact hc (hs ▸ h)
+  · exact hf e (hs ▸ h)
+
+/-- Going from `m` to `m'` preserves the invariant, and a reader that has rejected its input or
+closed stays so. -/
+def Pres2 (m m' : Machine .receiving) : Prop :=
+  (∀ c, InBounds m → Ok m c → InBounds m' ∧ ∃ c', c ++ rem m = c' ++ rem m' ∧ Ok m' c') ∧
+    (Dead m → Dead m')
+
+theorem pres2_refl (m : Machine .receiving) : Pres2 m m := ⟨fun c hib hok => ⟨hib, c, rfl, hok⟩, id⟩
 
 theorem pres2_trans {a b c : Machine .receiving} (h1 : Pres2 a b) (h2 : Pres2 b c) : Pres2 a c := by
-  intro x hib hok
-  obtain ⟨hib1, x1, hx1, hok1⟩ := h1 x hib hok
-  obtain ⟨hib2, x2, hx2, hok2⟩ := h2 x1 hib1 hok1
+  refine ⟨fun x hib hok => ?_, fun hd => h2.2 (h1.2 hd)⟩
+  obtain ⟨hib1, x1, hx1, hok1⟩ := h1.1 x hib hok
+  obtain ⟨hib2, x2, hx2, hok2⟩ := h2.1 x1 hib1 hok1
   exact ⟨hib2, x2, by rw [hx1, hx2], hok2⟩
 
-theorem pres2_of_rok {m m' : Machine .receiving} (h : ROK m m') : Pres2 m m' := rok_pres h
+theorem pres2_of_rok {m m' : Machine .receiving} (h : ROK m m') : Pres2 m m' :=
+  ⟨rok_pres h, dead_of_rok h⟩
 
 theorem pres2_ite {c : Prop} [Decidable c] {m a b : Machine .receiving} (ha : Pres2 m a)
     (hb : Pres2 m b) : Pres2 m (if c then a else b) := by
@@ -1216,7 +1248,7 @@ theorem pres2_ite {c : Prop} [Decidable c] {m a b : Machine .receiving} (ha : Pr
   · exact hb
 
 theorem pres2_closeOnBadMessage (m : Machine .receiving) : Pres2 m m.closeOnBadMessage :=
-  pres2_of_rok (rok_closed rfl rfl rfl)
+  pres2_of_rok (rok_closed rfl rfl rfl rfl)
 
 theorem pres2_writer {m : Machine .receiving} (f : Writer .receiving → Writer .receiving) :
     Pres2 m (m.modifyWriter f) := pres2_of_rok (rok_of_reader rfl)
@@ -1230,14 +1262,14 @@ theorem pres2_reset (m : Machine .receiving) (h : m.reader.state = .complete) :
     Pres2 m m.resetForNextMessage := by
   unfold Machine.resetForNextMessage
   split
-  · intro c hib hok
+  · refine ⟨fun c hib hok => ?_, fun hd => absurd hd (not_dead h (by simp) (by simp))⟩
     unfold Ok at hok
     rw [h] at hok
     obtain ⟨p, r, hd, d, rfl, hp, hr⟩ := hok
     refine ⟨by simpa [InBounds] using hib, p ++ r, by simp [rem], ?_⟩
     unfold Ok
     exact requests_snoc hp hr
-  · exact pres2_of_rok (rok_closed rfl rfl rfl)
+  · exact pres2_of_rok (rok_closed rfl rfl rfl rfl)
 
 theorem pres2_completeStep (m : Machine .receiving) : Pres2 m m.processCompleteStep := by
   unfold Machine.processCompleteStep
@@ -1394,7 +1426,7 @@ theorem pullNextChunk_pres2 (m : Machine .receiving) : Pres2 m m.pullNextChunk.1
           rfl
       · next h' => exact absurd hst (h' bs)
     rw [e]
-    intro c hib hok
+    refine ⟨fun c hib hok => ?_, fun hd => absurd hd (not_dead hst (by simp) (by simp))⟩
     have := parseBody_step hib hst hok
     rw [hpb] at this
     exact this
@@ -1413,11 +1445,11 @@ theorem pullNextChunk_pres2 (m : Machine .receiving) : Pres2 m m.pullNextChunk.1
           rfl
       · next h' => exact absurd hst (h' bs)
     rw [e]
-    intro c hib hok
+    refine ⟨fun c hib hok => ?_, fun hd => absurd hd (not_dead hst (by simp) (by simp))⟩
     have := parseBody_step hib hst hok
     rw [hpb] at this
     obtain ⟨hib2, c2, hc2, hok2⟩ := this
-    obtain ⟨hib3, c3, hc3, hok3⟩ := ih c2 hib2 hok2
+    obtain ⟨hib3, c3, hc3, hok3⟩ := ih.1 c2 hib2 hok2
     exact ⟨hib3, c3, by rw [hc2, hc3], hok3⟩
   | case3 x bs hst m1 sc hpb hsc _ =>
     have e : x.pullNextChunk = (m1, none) := by
@@ -1434,7 +1466,7 @@ theorem pullNextChunk_pres2 (m : Machine .receiving) : Pres2 m m.pullNextChunk.1
           simp [hsc]
       · next h' => exact absurd hst (h' bs)
     rw [e]
-    intro c hib hok
+    refine ⟨fun c hib hok => ?_, fun hd => absurd hd (not_dead hst (by simp) (by simp))⟩
     have := parseBody_step hib hst hok
     rw [hpb] at this
     exact this
@@ -1449,10 +1481,15 @@ theorem pullNextChunk_pres2 (m : Machine .receiving) : Pres2 m m.pullNextChunk.1
 
 theorem pullBody_pres2 (m : Machine .receiving) : Pres2 m m.pullBody.1 := by
   have h := pullNextChunk_pres2 m
-  intro c hib hok
-  obtain ⟨hib2, c2, hc2, hok2⟩ := h c hib hok
-  refine ⟨by simpa [Machine.pullBody, InBounds] using hib2, c2, by simpa [Machine.pullBody, rem] using hc2, ?_⟩
-  exact ok_congr (by simp [Machine.pullBody]) (by simp [Machine.pullBody]) hok2
+  refine ⟨fun c hib hok => ?_, fun hd => ?_⟩
+  · obtain ⟨hib2, c2, hc2, hok2⟩ := h.1 c hib hok
+    refine ⟨by simpa [Machine.pullBody, InBounds] using hib2, c2,
+      by simpa [Machine.pullBody, rem] using hc2, ?_⟩
+    exact ok_congr (by simp [Machine.pullBody]) (by simp [Machine.pullBody])
+      (by simp [Machine.pullBody]) hok2
+  · have := h.2 hd
+    unfold Dead at this ⊢
+    simpa [Machine.pullBody] using this
 
 /-! ## Feeding bytes -/
 
@@ -1490,7 +1527,7 @@ theorem feed_inv (m : Machine .receiving) (data : _root_.ByteArray) (s : List UI
       simp only [InBounds, Reader.feed]
       split <;> simp [_root_.ByteArray.mkIterator]
     have hok' : Ok ({ m with reader := m.reader.feed data, pullBodyStalled := false } : Machine .receiving) c :=
-      ok_congr (by simp [Reader.feed]) (by simp [Reader.feed]) hok
+      ok_congr (by simp [Reader.feed]) (by simp [Reader.feed]) (by simp [Reader.feed]) hok
     split
     · refine ⟨?_, c, ?_, ok_failed (e := .entityTooLarge) rfl⟩
       · simpa [InBounds, Machine.setFailure, Machine.setReaderState, Machine.modifyReader,
@@ -1503,13 +1540,14 @@ theorem feed_inv (m : Machine .receiving) (data : _root_.ByteArray) (s : List UI
 /-! ## The handler's operations -/
 
 theorem rok_flags {m m' : Machine .receiving} (hi : m'.reader.input = m.reader.input)
-    (hh : m'.reader.messageHead = m.reader.messageHead) (hs : m'.reader.state = m.reader.state) :
-    ROK m m' := ⟨hi, hh, Or.inl hs⟩
+    (hh : m'.reader.messageHead = m.reader.messageHead)
+    (hc : m'.reader.messageCount = m.reader.messageCount) (hs : m'.reader.state = m.reader.state) :
+    ROK m m' := ⟨hi, hh, hc, Or.inl hs⟩
 
 theorem pres2_closeWithError (m : Machine .receiving) (st : Status) : Pres2 m (m.closeWithError st) := by
   unfold Machine.closeWithError
-  refine pres2_ite (pres2_of_rok ?_) (pres2_of_rok (rok_flags rfl rfl rfl))
-  exact rok_trans (rok_send _ _) (rok_flags rfl rfl rfl)
+  refine pres2_ite (pres2_of_rok ?_) (pres2_of_rok (rok_flags rfl rfl rfl rfl))
+  exact rok_trans (rok_send _ _) (rok_flags rfl rfl rfl rfl)
 
 theorem pres2_canContinue (m : Machine .receiving) (st : Status) : Pres2 m (m.canContinue st) := by
   unfold Machine.canContinue
@@ -1517,7 +1555,7 @@ theorem pres2_canContinue (m : Machine .receiving) (st : Status) : Pres2 m (m.ca
   case «continue» ns =>
     simp only [hs]
     split
-    · intro c hib hok
+    · refine ⟨fun c hib hok => ?_, fun hd => absurd hd (not_dead hs (by simp) (by simp))⟩
       refine ⟨by simpa [InBounds, Machine.setReaderState, Machine.modifyReader, Machine.modifyWriter] using hib,
         c, by simp [rem, Machine.setReaderState, Machine.modifyReader, Machine.modifyWriter], ?_⟩
       unfold Ok at hok
@@ -1529,7 +1567,7 @@ theorem pres2_canContinue (m : Machine .receiving) (st : Status) : Pres2 m (m.ca
         obtain ⟨p, hb, h, body, rfl, hp, hhb, hrec, has, hprog⟩ := hok
         exact ⟨p, hb, h, [], body, by simp, hp, hhb, hrec, has, hprog⟩
       all_goals exact hok.elim
-    · exact pres2_of_rok (rok_trans (rok_send _ _) (rok_closed rfl rfl rfl))
+    · exact pres2_of_rok (rok_trans (rok_send _ _) (rok_closed rfl rfl rfl rfl))
   all_goals (simp only [hs]; exact pres2_refl m)
 
 /-! ## Every sequence of operations -/
@@ -1574,11 +1612,17 @@ def Op.fed : Op → Machine .receiving → List UInt8
 theorem inv_of_pres2 {m m' : Machine .receiving} {s : List UInt8} (hp : Pres2 m m') (h : Inv m s) :
     Inv m' s := by
   obtain ⟨hib, c, rfl, hok⟩ := h
-  obtain ⟨hib', c', hc, hok'⟩ := hp c hib hok
+  obtain ⟨hib', c', hc, hok'⟩ := hp.1 c hib hok
   exact ⟨hib', c', hc, hok'⟩
 
+theorem dead_processRead (m : Machine .receiving) (hd : Dead m) : Dead m.processRead := by
+  rcases hd with hd | ⟨e, hd⟩
+  · rw [(processRead_cases m).2.2.2.2.2.2.1 hd]; exact Or.inl hd
+  · rw [(processRead_cases m).2.2.2.2.1 e hd]
+    exact dead_of_rok (rok_handleReaderFailed m e) (Or.inr ⟨e, hd⟩)
+
 theorem pres2_step (m : Machine .receiving) : Pres2 m m.step.1 := by
-  have h1 : Pres2 m m.processRead := processRead_pres m
+  have h1 : Pres2 m m.processRead := ⟨processRead_pres m, dead_processRead m⟩
   have h2 := processWrite_pres2 m.processRead
   refine pres2_trans (pres2_trans h1 h2) ?_
   exact pres2_of_rok (rok_of_reader rfl)
@@ -1598,7 +1642,7 @@ theorem op_inv (op : Op) {m : Machine .receiving} {s : List UInt8} (h : Inv m s)
       | exact pres2_closeWithError m _
       | exact pres2_of_rok (by unfold Machine.sendData; exact rok_ite (rok_refl m) (rok_of_reader rfl))
       | exact pres2_of_rok (rok_of_reader rfl)
-      | exact pres2_of_rok (rok_flags rfl rfl rfl)
+      | exact pres2_of_rok (rok_flags rfl rfl rfl rfl)
 
 /-- Apply operations in order, collecting the bytes the reader accepted. -/
 def run : List Op → Machine .receiving → Machine .receiving × List UInt8
@@ -1616,21 +1660,75 @@ theorem inv_init (cfg : Protocol.H1.Config) : Inv ({ config := cfg } : Machine .
   refine ⟨by simp [InBounds, _root_.ByteArray.mkIterator], [], ?_, ?_⟩
   · simp [rem, _root_.ByteArray.mkIterator]
     rfl
-  · show Requests []
+  · show Requests [] 0
     exact requests_nil
 
 /-- **The receiving machine reads RFC 9112 requests.** Start from a fresh machine (as the server
 does) and apply any sequence of the server's operations: feeding bytes split in any way,
 stepping, pulling body chunks, responding, answering `Expect: 100-continue`, closing. Let `s` be
 the bytes the reader accepted. Then `s` is the bytes the reader consumed, `c`, followed by the
-bytes still buffered; and `c` is a sequence of complete request messages (RFC 9112, with body
-lengths as §6.3 assigns them) followed by the part of the next message that the reader's state
-describes. -/
+bytes still buffered; and `c` is complete request messages (RFC 9112, with body lengths as §6.3
+assigns them), as many as the reader has counted (`reader.messageCount`), followed by the part of
+the next message that the reader's state describes. -/
 theorem reads_requests (cfg : Protocol.H1.Config) (ops : List Op) :
     let r := run ops { config := cfg }
     ∃ c, r.2 = c ++ rem r.1 ∧ Ok r.1 c := by
   have := run_inv ops _ [] (inv_init cfg)
   simp only [List.nil_append] at this
   exact this.2
+
+/-! ## After a rejection -/
+
+theorem dead_op (op : Op) {m : Machine .receiving} (hd : Dead m) :
+    Dead (op.apply m) ∧ op.fed m = [] := by
+  have hcf : (m.isReaderClosed = true ∨ m.failed = true) := by
+    rcases hd with hd | ⟨e, hd⟩
+    · left; simp [Machine.isReaderClosed, hd]
+    · right; simp [Machine.failed, hd]
+  cases op with
+  | feed d =>
+    refine ⟨?_, by simp [Op.fed, hcf]⟩
+    simp only [Op.apply, Machine.feed, hcf, ↓reduceIte]
+    exact hd
+  | _ =>
+    refine ⟨?_, rfl⟩
+    simp only [Op.apply]
+    first
+      | exact (pres2_step m).2 hd
+      | exact (pullBody_pres2 m).2 hd
+      | exact (pres2_of_rok (rok_send m _)).2 hd
+      | exact (pres2_canContinue m _).2 hd
+      | exact (pres2_closeWithError m _).2 hd
+      | exact (pres2_of_rok (by unfold Machine.sendData; exact rok_ite (rok_refl m) (rok_of_reader rfl))).2 hd
+      | exact (pres2_of_rok (rok_of_reader rfl)).2 hd
+      | exact (pres2_of_rok (rok_flags rfl rfl rfl rfl)).2 hd
+
+theorem dead_run : ∀ (ops : List Op) {m : Machine .receiving}, Dead m →
+    Dead (run ops m).1 ∧ (run ops m).2 = []
+  | [], _, hd => ⟨hd, rfl⟩
+  | op :: ops, _, hd => by
+    obtain ⟨hd', hf⟩ := dead_op op hd
+    obtain ⟨h1, h2⟩ := dead_run ops hd'
+    exact ⟨h1, by simp [run, hf, h2]⟩
+
+theorem run_append : ∀ (ops₁ ops₂ : List Op) (m : Machine .receiving),
+    run (ops₁ ++ ops₂) m =
+      ((run ops₂ (run ops₁ m).1).1, (run ops₁ m).2 ++ (run ops₂ (run ops₁ m).1).2)
+  | [], _, _ => by simp [run]
+  | op :: ops₁, ops₂, m => by
+    simp only [List.cons_append, run]
+    rw [run_append ops₁ ops₂ (op.apply m)]
+    simp
+
+/-- **Nothing is read after a rejection.** If after the operations `ops₁` the reader has rejected
+its input (`failed`; the server answers with an error status) or closed, then after any further
+operations `ops₂` it is still failed or closed, and it has accepted no more bytes. -/
+theorem nothing_after_rejection (cfg : Protocol.H1.Config) (ops₁ ops₂ : List Op)
+    (hd : Dead (run ops₁ { config := cfg }).1) :
+    Dead (run (ops₁ ++ ops₂) { config := cfg }).1 ∧
+      (run (ops₁ ++ ops₂) { config := cfg }).2 = (run ops₁ { config := cfg }).2 := by
+  rw [run_append]
+  obtain ⟨h1, h2⟩ := dead_run ops₂ hd
+  exact ⟨h1, by simp [h2]⟩
 
 end HttpSpec.RealMachine

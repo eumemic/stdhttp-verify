@@ -12,3 +12,4 @@ import Spec.MultiMap
 import Spec.RequestLineSound
 import Spec.BodySound
 import Spec.Message
+import Spec.Unique
