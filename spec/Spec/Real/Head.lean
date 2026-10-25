@@ -168,7 +168,7 @@ theorem recorded_header {name value : List UInt8} {ns vs : String} {hn : Header.
     (hval : ∀ b ∈ value, Std.Http.Protocol.H1.Verified.isFieldContent b = true)
     (ht : toHeaderLine name value = some (ns, vs))
     (hn' : Header.Name.ofString? ns = some hn) (hv' : Header.Value.ofString? vs = some hv) :
-    ascii hn.value = name.map toLowerAscii ∧
+    ascii hn.value = name.map toLowerAscii ∧ (∀ c ∈ hn.value.toList, c.toNat < 128) ∧
     ∃ a b, value = a ++ ascii hv.value ++ b ∧ OWS a ∧ OWS b ∧ FieldValue (ascii hv.value) := by
   unfold toHeaderLine at ht
   cases h1 : String.fromUTF8? ⟨name.toArray⟩ with
@@ -189,11 +189,15 @@ theorem recorded_header {name value : List UInt8} {ns vs : String} {hn : Header.
     rw [tchar_byte (a1 c hc)] at this
     exact tchar_not_ws (a1 c hc) this
   have hnv := name_ofString? hn' hnws
-  refine ⟨?_, ?_⟩
+  refine ⟨?_, ?_, ?_⟩
   · rw [ascii_eq, hnv, ← e1, ascii_eq, List.map_map, List.map_map]
     apply List.map_congr_left
     intro c hc
     exact (lower_byte (a1 c hc)).symm
+  · intro c hc
+    rw [hnv, List.mem_map] at hc
+    obtain ⟨d, hd, rfl⟩ := hc
+    exact forall_ascii (P := fun d => d.toLower.toNat < 128) (by decide +kernel) (a1 d hd)
   -- the value
   · obtain ⟨b1, hd1, hb1⟩ := trimAsciiEnd_decomp s2
     obtain ⟨a, b, hd2, ha, hb⟩ := value_ofString? hv'

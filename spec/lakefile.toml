@@ -14,4 +14,4 @@ name = "Spec"
 [[lean_lib]]
 name = "SpecReal"
 roots = ["Spec.Real.Original", "Spec.Real.Fixed", "Spec.Real.Equiv", "Spec.Real.Server",
-  "Spec.Real.Framing", "Spec.Real.Head"]
+  "Spec.Real.Framing", "Spec.Real.Head", "Spec.Real.Machine"]

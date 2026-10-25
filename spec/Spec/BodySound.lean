@@ -44,7 +44,7 @@ theorem sliceBytes_eq (arr : _root_.ByteArray) (a k : Nat) (h : a + k ≤ arr.si
 theorem sound_parseFixedSizeData (size : Nat) :
     Sound (parseFixedSizeData size) (fun w t => match t with
       | .complete d => w = sliceBytes d ∧ w.length = size
-      | .incomplete d r => w = sliceBytes d ∧ w ≠ [] ∧ w.length + r = size) := by
+      | .incomplete d r => w = sliceBytes d ∧ w ≠ [] ∧ 0 < r ∧ w.length + r = size) := by
   intro arr i it t hi h
   unfold parseFixedSizeData at h
   have hr : (⟨arr, i⟩ : It).remainingBytes = arr.size - i := rfl
@@ -62,7 +62,7 @@ theorem sound_parseFixedSizeData (size : Nat) :
         show between arr i (i + (arr.size - i)) =
             sliceBytes (arr[i...(i + (arr.size - i))] : ByteSlice) ∧ _ ∧ _
         rw [sliceBytes_eq arr i (arr.size - i) (by omega)]
-        refine ⟨rfl, ?_, ?_⟩
+        refine ⟨rfl, ?_, by omega, ?_⟩
         · intro he
           have := congrArg List.length he
           simp [between] at this
@@ -82,7 +82,7 @@ theorem sound_parseFixedSizeData (size : Nat) :
 theorem sound_parseChunkSizedData (size : Nat) :
     Sound (parseChunkSizedData size) (fun w t => match t with
       | .complete d => w = sliceBytes d ++ Chunked.CRLF ∧ (sliceBytes d).length = size
-      | .incomplete d r => w = sliceBytes d ∧ w ≠ [] ∧ w.length + r = size) := by
+      | .incomplete d r => w = sliceBytes d ∧ w ≠ [] ∧ 0 < r ∧ w.length + r = size) := by
   simp only [parseChunkSizedData]
   refine sound_bind_wp (sound_parseFixedSizeData size) fun t => ?_
   cases t with
