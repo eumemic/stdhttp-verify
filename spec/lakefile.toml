@@ -13,4 +13,5 @@ name = "Spec"
 # copy, and the two cannot share one environment (they define the same names).
 [[lean_lib]]
 name = "SpecReal"
-roots = ["Spec.Real.Original", "Spec.Real.Fixed", "Spec.Real.Equiv", "Spec.Real.Server"]
+roots = ["Spec.Real.Original", "Spec.Real.Fixed", "Spec.Real.Equiv", "Spec.Real.Server",
+  "Spec.Real.Framing"]
