@@ -10,8 +10,8 @@ Differential testing and formal verification of Lean's built-in HTTP/1.1 server,
   trailer sections — are rewritten as total, end-of-input-strict functions and proven to give the
   same outcome however the input is split into reads; the chunk-size line is also proven to match
   RFC 9112's grammar (plus one documented leniency). The function that picks a request's body
-  length (`Message.Head.getSize`, unchanged from upstream) is proven to pick only lengths RFC 9112
-  §6.3 assigns, so it rejects every Transfer-Encoding/Content-Length combination the RFC says to
+  length (`Message.Head.getSize`) is proven, against the toolchain's own `Std.Http`, to pick only
+  lengths RFC 9112 §6.3 assigns, so it rejects every Transfer-Encoding/Content-Length combination the RFC says to
   reject. See `spec/README.md` for exactly what is proven and what each result trusts.
 
 `fix/` is a modified copy of `Std.Http` from Lean `nightly-2026-10-20` (Copyright Lean FRO, LLC,
