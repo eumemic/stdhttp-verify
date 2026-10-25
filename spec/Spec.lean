@@ -7,3 +7,4 @@ import Spec.RequestLine
 import Spec.ChunkLineSound
 import Spec.Framing
 import Spec.FramingFacts
+import Spec.HeaderSound
