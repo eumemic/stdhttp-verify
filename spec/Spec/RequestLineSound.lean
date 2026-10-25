@@ -15,7 +15,9 @@ HTTP-version   = "HTTP/" DIGIT "." DIGIT
 
 with a request-target of one or more `VCHAR` bytes (a superset of the target forms of RFC 9112
 §3.2; the URI parser decides which of them `Std.Http` accepts). `requestLine_sound` states this for
-every input: in particular the bytes consumed contain no CR or LF before the final `CRLF`.
+every input: in particular the bytes consumed contain no CR or LF before the final `CRLF`. The
+method it returns is the one its token names (`methodOfBytes?`), and the request-target is what the
+URI parser makes of the target bytes (`parseTarget`).
 -/
 
 open Std.Internal.Parsec Std.Internal.Parsec.ByteArray
@@ -56,11 +58,18 @@ theorem sound_skipEmptyLines (max : Nat) :
       subst h1
       exact EmptyLines.nil
 
-theorem sound_method : Sound method (fun w _ => Chunked.Token w) := by
+/-- What the URI parser makes of request-target bytes `t`; the request-line parser runs it on the
+whole target. -/
+def parseTarget (t : List UInt8) : Except String Std.Http.RequestTarget :=
+  (Std.Http.URI.Parser.parseRequestTarget <* Std.Internal.Parsec.eof).run ⟨t.toArray⟩
+
+theorem sound_method :
+    Sound method (fun w r => Chunked.Token w ∧ methodOfBytes? w = some r) := by
   simp only [method]
   refine sound_bind_wp (sound_token _) fun tok => ?_
   split
-  · exact sound_pure_wp fun w ⟨_, h⟩ => by simpa using h
+  · next m hm =>
+    exact sound_pure_wp fun w ⟨he, h⟩ => by subst he; simpa using ⟨h, hm⟩
   · exact sound_fail _ _
 
 theorem sound_rawUri (max : Nat) : Sound (rawUri max) (fun w u => w = u) := by
@@ -107,6 +116,7 @@ theorem sound_httpVersionNumber :
 
 theorem sound_requestLine (lim : RequestLineLimits) :
     Sound (requestLine lim) (fun w r => ∃ m t major minor, RequestLineBytes w m t major minor ∧
+      methodOfBytes? m = some r.1 ∧ parseTarget t = .ok r.2.1 ∧
       r.2.2 = Std.Http.Version.ofNumber? (major - 0x30).toNat (minor - 0x30).toNat) := by
   simp only [requestLine]
   refine sound_bind_wp (sound_skipEmptyLines _ _ _) fun _ => ?_
@@ -116,15 +126,16 @@ theorem sound_requestLine (lim : RequestLineLimits) :
   refine sound_bind_wp (sound_pbyte _) fun _ => ?_
   refine sound_ite (fun _ => sound_fail _ _) (fun hraw => ?_)
   split
-  · refine sound_bind_wp sound_httpVersionNumber fun _ => ?_
+  · next target htarget =>
+    refine sound_bind_wp sound_httpVersionNumber fun _ => ?_
     refine sound_bind_wp (sound_pbyte _) fun _ => ?_
     refine sound_bind_wp (sound_pbyte _) fun _ => sound_pure_wp ?_
-    intro w8 ⟨h8, _⟩ w7 ⟨h7, _⟩ w6 ⟨major, minor, dmaj, dmin, h6, hv⟩ w5 ⟨h5, _⟩ w4 h4 w3 ⟨h3, _⟩ w2 h2
-      w1 h1
+    intro w8 ⟨h8, _⟩ w7 ⟨h7, _⟩ w6 ⟨major, minor, dmaj, dmin, h6, hv⟩ w5 ⟨h5, _⟩ w4 h4 w3 ⟨h3, _⟩
+      w2 ⟨h2, hm⟩ w1 h1
     subst h8 h7 h6 h5 h4 h3 hv
     simp only [Bool.or_eq_true, Bool.not_eq_true', not_or, Bool.not_eq_false,
       List.isEmpty_iff, List.all_eq_true] at hraw
-    refine ⟨w2, w4, major, minor, ⟨w1, h1, h2, hraw.1, hraw.2, dmaj, dmin, ?_⟩, rfl⟩
+    refine ⟨w2, w4, major, minor, ⟨w1, h1, h2, hraw.1, hraw.2, dmaj, dmin, ?_⟩, hm, htarget, rfl⟩
     simp [Chunked.CRLF, Chunked.CR, Chunked.LF, CR, LF, Chunked.SP, SP]
   · exact sound_fail _ _
 
@@ -133,6 +144,7 @@ one request line. -/
 theorem requestLine_sound (lim : RequestLineLimits) {arr : _root_.ByteArray} {i : Nat} {it : It}
     {r} (hi : i ≤ arr.size) (h : requestLine lim ⟨arr, i⟩ = .success it r) :
     ∃ m t major minor, RequestLineBytes (between arr i it.idx) m t major minor ∧
+      methodOfBytes? m = some r.1 ∧ parseTarget t = .ok r.2.1 ∧
       r.2.2 = Std.Http.Version.ofNumber? (major - 0x30).toNat (minor - 0x30).toNat :=
   (sound_requestLine lim arr i it r hi h).2.2.2
 

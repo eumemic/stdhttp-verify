@@ -15,7 +15,8 @@ Differential testing and formal verification of Lean's built-in HTTP/1.1 server,
   reject. The receiving protocol machine, under any sequence of the operations the server
   performs and with its input split into reads in any way, reads only request messages of the
   grammar in `spec/Spec/Message.lean` (RFC 9112, taking the strict option where the RFC lets a
-  recipient choose), in order, recording each one's header fields and version; the grammar splits
+  recipient choose), in order, recording each one's method, request-target, header fields and
+  version; the grammar splits
   a byte stream in only one way, so a front end that divides the stream by the same grammar agrees
   with the server on every request it reads (`no_desync`). After a rejection the reader accepts
   no more bytes (`nothing_after_rejection`). See `spec/README.md` for exactly what is proven and

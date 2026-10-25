@@ -72,8 +72,9 @@ where:
 
 * `ps` are complete request messages, as many as the machine has finished
   (`reader.messageCount`), and `ps` and `ms` agree: one list is a prefix of the other;
-* while the machine reads the body of its current request, the header fields and version it
-  recorded are those of `ms`'s next message after `ps`;
+* while the machine reads the body of its current request, the head it recorded (`Recorded`: the
+  method, the request-target as the URI parser reads the target bytes, the header fields in order,
+  the version) is that of `ms`'s next message after `ps`;
 * when the machine has finished its current request, the bytes `q` it consumed for it are that
   message. -/
 theorem no_desync (cfg : Protocol.H1.Config) (ops : List Op) {ms : List (List UInt8)}

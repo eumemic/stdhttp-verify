@@ -62,8 +62,10 @@ theorem ascii_inj {s t : String} (hs : ∀ c ∈ s.toList, c.toNat < 128)
 /-! ## The recorded head -/
 
 /-- The head the machine records, `mh`, is the spec head `h`: the header store is well indexed and
-holds `h`'s fields in order (names in lowercase, ASCII), and the version is the one the request
-line's digits denote (HTTP/1.0 or HTTP/1.1, the only versions the machine continues with). -/
+holds `h`'s fields in order (names in lowercase, ASCII), the version is the one the request
+line's digits denote (HTTP/1.0 or HTTP/1.1, the only versions the machine continues with), the
+method is the one `h`'s method token names, and the request-target is what the URI parser makes of
+`h`'s target bytes. -/
 def Recorded (mh : Request.Head) (h : Head) : Prop :=
   MultiMap.IndexOk mh.headers.map ∧
   mh.headers.map.entries.toList.map (fun e => (ascii e.1.value, ascii e.2.value)) =
@@ -71,7 +73,8 @@ def Recorded (mh : Request.Head) (h : Head) : Prop :=
   (∀ e ∈ mh.headers.map.entries.toList, ∀ c ∈ e.1.value.toList, c.toNat < 128) ∧
   isDigit h.major = true ∧ isDigit h.minor = true ∧
   Version.ofNumber? (h.major - 0x30).toNat (h.minor - 0x30).toNat = some mh.version ∧
-  (mh.version = .v10 ∨ mh.version = .v11)
+  (mh.version = .v10 ∨ mh.version = .v11) ∧
+  Verified.methodOfBytes? h.method = some mh.method ∧ parseTarget h.target = .ok mh.uri
 
 theorem fieldValues_of_recorded {m : Request.Head} {h : Head} (hr : Recorded m h) (N : Header.Name)
     (hN : ∀ c ∈ N.value.toList, c.toNat < 128) : fieldValues m N = h.values N.value := by
@@ -181,6 +184,7 @@ theorem ok_closed {m : Machine .receiving} {c : List UInt8} (h : m.reader.state 
 theorem sound_parseRequestLineRawVersion (cfg : Protocol.H1.Config) :
     Sound (parseRequestLineRawVersion cfg) (fun w r => ∃ mth t major minor,
       RequestLineBytes w mth t major minor ∧
+      Verified.methodOfBytes? mth = some r.1 ∧ parseTarget t = .ok r.2.1 ∧
       r.2.2 = Version.ofNumber? (major - 0x30).toNat (minor - 0x30).toNat) := by
   simp only [parseRequestLineRawVersion]
   exact sound_requestLine _
@@ -229,10 +233,11 @@ theorem empty_headers_map : (Headers.empty).map = Std.Internal.IndexMultiMap.emp
 
 theorem recorded_start {method : Method} {uri : RequestTarget} {v : Version} {mth t : List UInt8}
     {major minor : UInt8} (hd1 : isDigit major = true) (hd2 : isDigit minor = true)
+    (hm : Verified.methodOfBytes? mth = some method) (hu : parseTarget t = .ok uri)
     (hver : some v = Version.ofNumber? (major - 0x30).toNat (minor - 0x30).toNat)
     (hv : v = .v11 ∨ v = .v10) :
     Recorded { method, version := v, uri } ⟨mth, t, major, minor, []⟩ := by
-  refine ⟨?_, ?_, ?_, hd1, hd2, hver.symm, ?_⟩
+  refine ⟨?_, ?_, ?_, hd1, hd2, hver.symm, ?_, hm, hu⟩
   · show MultiMap.IndexOk (Headers.empty).map
     rw [empty_headers_map]
     exact MultiMap.indexOk_empty
@@ -261,7 +266,7 @@ theorem startLine_step {m m1 : Machine .receiving} {c : List UInt8} {method : Me
       Ok ((m1.modifyReader (Reader.setMessageHead { method, version := v, uri })).setReaderState
         (.needHeader 0)) c' := by
   obtain ⟨it, hit, rfl⟩ := Machine.parseWith_some hpw
-  obtain ⟨hib', w, hw, mth, t, major, minor, hrl, hver⟩ :=
+  obtain ⟨hib', w, hw, mth, t, major, minor, hrl, hm, hu, hver⟩ :=
     consume (sound_parseRequestLineRawVersion _) hib hit
   refine ⟨?_, c ++ w, ?_, ?_⟩
   · simpa [InBounds, Machine.setReaderState, Machine.modifyReader, Reader.setMessageHead] using hib'
@@ -271,7 +276,7 @@ theorem startLine_step {m m1 : Machine .receiving} {c : List UInt8} {method : Me
     simp only [Machine.setReaderState, Machine.modifyReader, Reader.setMessageHead]
     obtain ⟨_, _, _, _, _, hd1, hd2, _⟩ := id hrl
     exact ⟨c, w, ⟨mth, t, major, minor, []⟩, rfl, hok, ⟨w, [], by simp, hrl, FieldLines.nil⟩, rfl,
-      recorded_start hd1 hd2 hver hv⟩
+      recorded_start hd1 hd2 hm hu hver hv⟩
 
 theorem ows_append' {a b : List UInt8} (ha : OWS a) (hb : OWS b) : OWS (a ++ b) := by
   intro x hx
