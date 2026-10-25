@@ -125,12 +125,18 @@ structure RequestLineLimits where
   maxLeadingEmptyLines : Nat := 8
   maxUriLength : Nat := 8192
 
+/-- `VCHAR`: the bytes a request-target can contain. -/
+def isVChar (b : UInt8) : Bool := 0x21 ≤ b && b ≤ 0x7E
+
 def requestLine (lim : RequestLineLimits := {}) : Parser (Method × RequestTarget × Option Version) := do
   skipEmptyLines lim.maxLeadingEmptyLines (lim.maxLeadingEmptyLines + 1) 0
   let m ← method
   let _ ← pbyte SP
   let raw ← rawUri lim.maxUriLength
   let _ ← pbyte SP
+  -- The URI parser rejects these targets too; checking here keeps the request line on one line
+  -- without relying on the URI parser.
+  if raw.isEmpty || !raw.all isVChar then fail "invalid request-target" else
   match (Std.Http.URI.Parser.parseRequestTarget <* Std.Internal.Parsec.eof).run ⟨raw.toArray⟩ with
   | .ok target =>
     let (major, minor) ← httpVersionNumber

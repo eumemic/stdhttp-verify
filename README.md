@@ -15,7 +15,10 @@ Differential testing and formal verification of Lean's built-in HTTP/1.1 server,
   reject. See `spec/README.md` for exactly what is proven and what each result trusts.
 
 `fix/` is a modified copy of `Std.Http` from Lean `nightly-2026-10-20` (Copyright Lean FRO, LLC,
-Apache 2.0); changes: `Protocol/H1/ChunkLine.lean` and `Protocol/H1/RequestLine.lean` (new),
+Apache 2.0); changes: `Protocol/H1/ChunkLine.lean` and `Protocol/H1/RequestLine.lean` (new; the
+request-line parser rejects a request-target containing a byte outside `VCHAR` before running the
+URI parser, which rejects those targets too — checked for every such byte at every position of
+seven targets),
 `Protocol/H1/Parser.lean`, whose `parseChunkSize`, `parseLastChunkBody`, `parseRequestLineRawVersion`
 and `parseSingleHeader` call them (the previous versions are kept as `*Legacy`), and
 `Protocol/H1.lean`, whose 18 `partial def`s (the read and write loops) are total definitions with
