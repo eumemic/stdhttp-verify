@@ -20,9 +20,11 @@ request-line parser rejects a request-target containing a byte outside `VCHAR` b
 URI parser, which rejects those targets too — checked for every such byte at every position of
 seven targets),
 `Protocol/H1/Parser.lean`, whose `parseChunkSize`, `parseLastChunkBody`, `parseRequestLineRawVersion`
-and `parseSingleHeader` call them (the previous versions are kept as `*Legacy`), and
+and `parseSingleHeader` call them (the previous versions are kept as `*Legacy`; `parseChunkSizedData`
+reads the `CRLF` after chunk data as two bytes instead of through a private helper), and
 `Protocol/H1.lean`, whose 18 `partial def`s (the read and write loops) are total definitions with
-termination proofs and otherwise unchanged. Licensed under
+termination proofs, and whose helpers are public so that proofs can refer to them; otherwise
+unchanged. Licensed under
 Apache 2.0 (`LICENSE`).
 
 - `servers/lean_stdhttp/` — HTTP Garden echo origin built on `Std.Http` (toolchain pinned in `lean-toolchain`).
