@@ -24,6 +24,10 @@ Build: `lake build` (toolchain `nightly-2026-10-20`; depends on the patched copy
 | `Spec/Real/Head.lean` | `recorded_header`: when `Std.Http` records a parsed header line, the stored name is the field name in lowercase and the stored value is the field value without the surrounding whitespace (UTF-8 decoding of the ASCII bytes included). | kernel only |
 | `Spec/MultiMap.lean` | `vals_ofList`: the header store (`IndexMultiMap`), built by inserting fields in order, returns for each name exactly the values inserted under it, in order. | kernel only |
 | `Spec/BodySound.lean` | The body parsers consume exactly their grammar: `parseChunkSize` a chunk-size line; `parseFixedSizeData` and `parseChunkSizedData` the data bytes they return (and the `CRLF` after complete chunk data); `parseLastChunkBody` a trailer section and the final `CRLF`. | kernel only |
+| `Spec/Message.lean` | Request messages as relations on bytes (RFC 9112 §2.1, §3, §5, §6, §7.1): `HeadBytes` (empty lines, request line, field lines, `CRLF`), `ChunkedBody` (chunks, last chunk, trailer section), `BodyOf` (a body delimited as `Framing.Assigns` says), `RequestBytes w h d` (one request with head `h` and decoded body `d`), `Requests w n` (`n` requests in a row). Where RFC 9112 lets a recipient choose, the grammar takes the strict option: lines end in `CRLF` only, field values have no `obs-fold`, and Content-Length is one field line with one value. Two choices follow `Std.Http`, documented where they are made: chunk-size lines use the grammar of `Spec/Chunked.lean`, and the request-target is any non-empty run of `VCHAR`. | kernel only |
+| `Spec/Real/Machine.lean` | `reads_requests`: start from a fresh `Machine .receiving` (as the server does) and apply any sequence of the operations the server performs (`Server/Connection.lean`): feeding bytes split in any way, stepping, pulling body chunks, sending a response and its data, answering `Expect: 100-continue`, closing with an error, ending the input. The bytes the reader has consumed are `reader.messageCount` complete request messages followed by the part of the next one that its state describes, and the header fields and version it recorded are that message's. `nothing_after_rejection`: once the reader has failed (rejected its input) or closed, it stays failed or closed under every further operation and accepts no more bytes. | kernel only |
+| `Spec/Unique.lean` | The message grammar splits a byte stream in only one way. `request_unique`: a request message at the start of a stream is determined by the stream (its bytes, head and decoded body). `requests_unique`: two splittings of a stream into request messages agree (one list of messages is a prefix of the other). | kernel only |
+| `Spec/Real/NoDesync.lean` | `no_desync`: take the bytes the machine has accepted under any sequence of operations, and any split of them into request messages `ms` followed by other bytes (how a front end that uses the same grammar divides the stream). Unless the reader has failed or closed: the requests it has finished and `ms` agree (one list is a prefix of the other); while it reads a request's body, the header fields and version it recorded are those of the next message of `ms`; when it has finished a request, the bytes it consumed for it are that message. | kernel only |
 | `Spec/Real/Equiv.lean` | The verified parsers match the hand-written (patched) ones they replaced: identical outcomes on every string of length ≤ 6–7 over small alphabets and on boundary cases with all prefixes (chunk-size lines, trailers, header lines). Request lines: identical on every complete line (all 40 methods, odd targets/versions, limits); on truncated input the verified parser sometimes waits where the legacy one has already rejected an unknown method (`GETG`), never the reverse — 12 of 17,997 prefixes. | compiler (`native_decide`) |
 | `Spec/Real/Original.lean` | The shipped parsers are not prefix-consistent (`5;` vs `5;a=b\r\n`; `X` vs `X:a\r\n\r\n`). | compiler (`native_decide`) |
 | `Spec/Real/Fixed.lean` | The hand-written patched parsers pass a bounded prefix-consistency check. | compiler (`native_decide`) |
@@ -36,13 +40,10 @@ delivery, 3,000 random splits) match single-write delivery.
 
 1. ~~Total definitions and all-input prefix consistency for the chunk-size and trailer parsers.~~ Done.
 2. ~~The same for the request line and header lines.~~ Done.
-3. Grammar correctness: done for chunk-size lines (soundness). Remaining: soundness for trailers,
-   header lines and request lines; completeness (every grammatical input within the limits is
-   accepted); the chunked decoder against `ChunkedBody` including chunk data.
+3. ~~Soundness of each parser the receiver runs.~~ Done. Remaining: completeness (every message of
+   the grammar within the limits is accepted; today the theorems constrain only what is accepted).
 4. Lift segmentation independence from single parsers to the whole `Machine .receiving`.
-5. RFC 9112 §6 framing: done for the parts — the body-length decision, the request line, header
-   lines and the header store, the body parsers, and total loops. Remaining: the composition, an
-   invariant of the protocol machine over every operation the server performs (feeding bytes,
-   stepping, pulling body chunks, responding, `100-continue`, closing). The goal: the requests the
-   server reads from a byte stream are the ones RFC 9112 delimits, for every segmentation and
-   every handler behavior, and it reads nothing after a rejection.
+5. ~~RFC 9112 §6 framing for the whole machine, over every operation the server performs~~ Done
+   (`reads_requests`, `no_desync`, `nothing_after_rejection`). Not covered: the method and
+   request-target the machine records (the URI parser is outside the proofs), and the body data it
+   hands to the handler (the theorems cover the bytes a body occupies, not the data delivered).

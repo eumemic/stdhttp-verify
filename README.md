@@ -12,7 +12,14 @@ Differential testing and formal verification of Lean's built-in HTTP/1.1 server,
   RFC 9112's grammar (plus one documented leniency). The function that picks a request's body
   length (`Message.Head.getSize`) is proven, against the toolchain's own `Std.Http`, to pick only
   lengths RFC 9112 §6.3 assigns, so it rejects every Transfer-Encoding/Content-Length combination the RFC says to
-  reject. See `spec/README.md` for exactly what is proven and what each result trusts.
+  reject. The receiving protocol machine, under any sequence of the operations the server
+  performs and with its input split into reads in any way, reads only request messages of the
+  grammar in `spec/Spec/Message.lean` (RFC 9112, taking the strict option where the RFC lets a
+  recipient choose), in order, recording each one's header fields and version; the grammar splits
+  a byte stream in only one way, so a front end that divides the stream by the same grammar agrees
+  with the server on every request it reads (`no_desync`). After a rejection the reader accepts
+  no more bytes (`nothing_after_rejection`). See `spec/README.md` for exactly what is proven and
+  what each result trusts.
 
 `fix/` is a modified copy of `Std.Http` from Lean `nightly-2026-10-20` (Copyright Lean FRO, LLC,
 Apache 2.0); changes: `Protocol/H1/ChunkLine.lean` and `Protocol/H1/RequestLine.lean` (new; the
