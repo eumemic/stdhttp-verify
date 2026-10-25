@@ -188,4 +188,58 @@ theorem chunkedIsFinal_of_plain {ps : List (List UInt8)} {t b : List UInt8} (ht 
     rw [List.append_nil, ← e1, e2]
     exact ⟨_, rfl, hch _ rfl⟩
 
+/-! ## Examples -/
+
+private theorem names_of_codings {l : List UInt8} {ns : List (List UInt8)} (hs : SEMI ∉ l)
+    (h : Codings [l] ns) : ns = plainNames l := by
+  cases h with
+  | cons hl hrest =>
+    cases hrest
+    have := listOf_plainNames hl hs [] (by intro _ h; cases h)
+    simpa using this.symm
+
+example : ChunkedIsFinal [ascii "gzip, chunked"] := by
+  have h := chunkedIsFinal_of_plain (t := ascii "gzip") (b := []) (ps := [ascii " chunked"])
+    ⟨by decide, by decide⟩ (by intro _ h; cases h)
+    (by
+      intro p hp
+      simp only [List.mem_singleton] at hp
+      subst hp
+      exact ⟨ascii " ", ascii "chunked", [], by decide, by decide, ⟨by decide, by decide⟩,
+        by intro _ h; cases h⟩)
+    (fun _ => rfl) (by
+      intro p hp x hx
+      simp only [List.getLast?_singleton, Option.some.injEq] at hp
+      subst hp
+      have e : (ascii " chunked").getLast? = some 0x64 := by decide
+      rw [e, Option.some.injEq] at hx
+      subst hx
+      decide)
+    (by intro n hn; simp at hn; subst hn; unfold IsChunked; decide)
+  have e : ascii "gzip" ++ [] ++ [ascii " chunked"].flatMap ([COMMA] ++ ·) = ascii "gzip, chunked" := by
+    decide
+  rwa [e] at h
+
+example : ¬ ChunkedIsFinal [ascii "chunked, gzip"] := by
+  intro ⟨⟨ns, hns⟩, hall⟩
+  obtain ⟨n, hn, hc⟩ := hall ns hns
+  rw [names_of_codings (by decide) hns] at hn
+  have : n = ascii "gzip" := by
+    have e : plainNames (ascii "chunked, gzip") = [ascii "chunked", ascii "gzip"] := by decide
+    rw [e] at hn
+    simpa using hn.symm
+  subst this
+  exact absurd hc (by unfold IsChunked; decide)
+
+example : ¬ ChunkedIsFinal [ascii "xchunked"] := by
+  intro ⟨⟨ns, hns⟩, hall⟩
+  obtain ⟨n, hn, hc⟩ := hall ns hns
+  rw [names_of_codings (by decide) hns] at hn
+  have : n = ascii "xchunked" := by
+    have e : plainNames (ascii "xchunked") = [ascii "xchunked"] := by decide
+    rw [e] at hn
+    simpa using hn.symm
+  subst this
+  exact absurd hc (by unfold IsChunked; decide)
+
 end HttpSpec.Framing
