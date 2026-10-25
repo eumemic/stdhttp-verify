@@ -1560,11 +1560,13 @@ theorem chunkSizedData_size {size : Nat} {it it' : ByteArray.Iterator} {t : Take
     have := fixedSizeData_size hf
     cases t₁ with
     | complete d =>
-      simp only [SeqRight.seqRight, Std.Internal.Parsec.bind, pure, Std.Internal.Parsec.pure] at h
+      simp only [Std.Internal.Parsec.bind, pure, Std.Internal.Parsec.pure] at h
       split at h
-      · injection h with _ h2
-        subst h2
-        exact this
+      · split at h
+        · injection h with _ h2
+          subst h2
+          exact this
+        · exact nomatch h
       · exact nomatch h
     | incomplete d r =>
       simp only [pure, Std.Internal.Parsec.pure] at h

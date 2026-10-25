@@ -520,7 +520,12 @@ Parses fixed-size chunk data that can be incomplete.
 -/
 public def parseChunkSizedData (size : Nat) : Parser TakeResult := do
   match ← parseFixedSizeData size with
-  | .complete data => crlf *> return .complete data
+  | .complete data =>
+    -- `CRLF` read as two bytes (as `crlf` does, with different error messages), so that proofs
+    -- can follow it.
+    let _ ← pbyte Verified.CR
+    let _ ← pbyte Verified.LF
+    return .complete data
   | .incomplete data res => return .incomplete data res
 
 /--
