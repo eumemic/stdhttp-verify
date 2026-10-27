@@ -16,3 +16,4 @@ import Spec.Unique
 import Spec.MessageExamples
 import Spec.Shift
 import Spec.Tight
+import Spec.Complete
