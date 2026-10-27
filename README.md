@@ -18,8 +18,9 @@ Differential testing and formal verification of Lean's built-in HTTP/1.1 server,
   recipient choose), in order, recording each one's method, request-target, header fields and
   version; the grammar splits
   a byte stream in only one way, so a front end that divides the stream by the same grammar agrees
-  with the server on every request it reads (`no_desync`). After a rejection the reader accepts
-  no more bytes (`nothing_after_rejection`). See `spec/README.md` for exactly what is proven and
+  with the server on every request it reads (`no_desync`), and the body data handed to the
+  handler is each request's decoded body, in order (`pulled_bodies`). After a rejection the
+  reader accepts no more bytes (`nothing_after_rejection`). See `spec/README.md` for exactly what is proven and
   what each result trusts.
 
 `fix/` is a modified copy of `Std.Http` from Lean `nightly-2026-10-20` (Copyright Lean FRO, LLC,

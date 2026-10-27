@@ -599,4 +599,60 @@ theorem requests_unique : ∀ {ms ms' : List (List UInt8)} {u u' : List UInt8},
     · exact Or.inl ⟨k, by simp, rfl⟩
     · exact Or.inr ⟨k, by simp, rfl⟩
 
+/-! ## Partial bodies -/
+
+theorem prefix_of_append_eq {a b x y : List UInt8} (e : a ++ x = b ++ y) (hl : a.length ≤ b.length) :
+    a <+: b := by
+  have h : a = b.take a.length := by
+    have := congrArg (List.take a.length) e
+    simpa [List.take_append_of_le_length hl] using this
+  rw [h]
+  exact List.take_prefix _ _
+
+/-- Complete chunks at the start of a chunked body are its first chunks. -/
+theorem chunks_prefix {cs1 d1 cs d line0 X Z : List UInt8} (h1 : ChunksC cs1 d1) (h : ChunksC cs d)
+    (hl : ChunkSizeLineL line0 0) (e : cs1 ++ X = cs ++ line0 ++ Z) :
+    ∃ cs2 d2, cs = cs1 ++ cs2 ∧ d = d1 ++ d2 ∧ ChunksC cs2 d2 ∧ X = cs2 ++ line0 ++ Z := by
+  induction h1 generalizing cs d with
+  | nil => exact ⟨cs, d, rfl, rfl, h, by simpa using e⟩
+  | @cons line size data rest drest hc hs hd _ ih =>
+    cases h with
+    | nil =>
+      have := (chunkLine_unique hc hl (by simpa [List.append_assoc] using e)).2.1
+      omega
+    | @cons line' size' data' rest' drest' hc' hs' hd' hr' =>
+      obtain ⟨rfl, rfl, e2⟩ := chunkLine_unique hc hc' (by simpa [List.append_assoc] using e)
+      obtain ⟨rfl, e3⟩ := List.append_inj e2 (by omega)
+      have e4 : rest ++ X = rest' ++ line0 ++ Z := by simpa [CRLF, List.append_assoc] using e3
+      obtain ⟨cs2, d2, rfl, rfl, hcs2, rfl⟩ := ih hr' e4
+      exact ⟨cs2, d2, by simp [List.append_assoc], by simp [List.append_assoc], hcs2, rfl⟩
+
+/-- What the start of a chunked body decodes to is the start of what the body decodes to: complete
+chunks, then a chunk-size line and part of its data. -/
+theorem chunked_partial_prefix {cs1 d1 line pd cs d line0 X Z : List UInt8} {size : Nat}
+    (h1 : ChunksC cs1 d1) (hl : ChunkSizeLineL line size)
+    (hpd : (size = 0 ∧ pd = []) ∨ (1 ≤ size ∧ pd.length < size))
+    (h : ChunksC cs d) (hl0 : ChunkSizeLineL line0 0)
+    (e : cs1 ++ line ++ pd ++ X = cs ++ line0 ++ Z) : d1 ++ pd <+: d := by
+  obtain ⟨cs2, d2, rfl, rfl, hcs2, e2⟩ :=
+    chunks_prefix (X := line ++ pd ++ X) h1 h hl0 (by simpa [List.append_assoc] using e)
+  cases hcs2 with
+  | nil =>
+    have := (chunkLine_unique hl hl0 (by simpa [List.append_assoc] using e2)).2.1
+    rcases hpd with ⟨_, rfl⟩ | ⟨h1', _⟩
+    · simp
+    · omega
+  | @cons line' size' data' rest' drest' hc' hs' hd' hr' =>
+    obtain ⟨rfl, rfl, e3⟩ := chunkLine_unique hl hc' (by simpa [List.append_assoc] using e2)
+    rcases hpd with ⟨_, rfl⟩ | ⟨_, hlt⟩
+    · exact ⟨data' ++ drest', by simp⟩
+    · obtain ⟨t, ht⟩ := prefix_of_append_eq (b := data') (y := CRLF ++ rest' ++ line0 ++ Z)
+        (by simpa [List.append_assoc] using e3) (by omega)
+      exact ⟨t ++ drest', by rw [← ht]; simp [List.append_assoc]⟩
+
+/-- The bytes of a fixed-length or chunked body read so far decode to the start of what the whole
+body decodes to. -/
+theorem fixed_partial_prefix {b bb X Y : List UInt8} (e : b ++ X = bb ++ Y)
+    (hl : b.length ≤ bb.length) : b <+: bb := prefix_of_append_eq e hl
+
 end HttpSpec.Unique
