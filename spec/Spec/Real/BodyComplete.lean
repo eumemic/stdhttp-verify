@@ -1026,20 +1026,10 @@ theorem getSize_of_assigns {mh : Request.Head} {fields : List (Header.Name × He
   | length hcv => exact ⟨_, getSize_length hh hf hte hcl hcv, rfl⟩
   | none => exact ⟨_, getSize_none hh hf hte hcl, rfl⟩
 
-/-- **The machine reads every request within its limits.** At the start of a request
-(`needStartLine`, nothing sent yet), with the unread bytes a request line `rl`, header lines
-`lines`, `CRLF`, a body `w` and then anything (`rest`): the read loop records the head (method,
-target, version, and each header line in order), and pulls then deliver the body's data `d`,
-complete the body, and leave `rest` unread.
-
-The conditions: the request line and header lines are within the configured limits, of HTTP/1.1
-or HTTP/1.0, with a method `Std.Http` recognizes, a target the URI parser accepts, and ASCII field
-values (`head_read`); the target's form suits the method (`TargetSuits`); in HTTP/1.1, or when a
-Host line is present, there is exactly one Host line and `Std.Http`'s Host check accepts it
-(`HostAccepted`); there is no Expect line (in HTTP/1.1); RFC 9112 §6.3 assigns the body length
-`body` and the request meets `Std.Http`'s stricter framing rules (`StdFraming`); and the body is
-within the body and chunk limits (`BodyFits`). -/
-theorem request_read {m : Machine .receiving} {rl mb tb w d rest : List UInt8} {major minor : UInt8}
+/-- What the read loop leaves after a whole request head that passes the checks: the head
+recorded, the reader in the body's initial state (behind a wait for `canContinue` with
+`Expect: 100-continue`), the body bytes unread. -/
+theorem request_head {m : Machine .receiving} {rl mb tb w d rest : List UInt8} {major minor : UInt8}
     {M : Method} {T : RequestTarget} {v : Version} {lines : List (List UInt8 × List UInt8)}
     {te cl : List (List UInt8)} {body : HttpSpec.Framing.Body}
     (hst : m.reader.state = .needStartLine) (hib : InBounds m) (hs : m.writer.sentMessage = false)
@@ -1054,14 +1044,16 @@ theorem request_read {m : Machine .receiving} {rl mb tb w d rest : List UInt8} {
     (htarget : TargetSuits M T)
     (hhost : ∀ hs, LineVals lines "host" hs → (v = .v11 ∨ hs ≠ []) →
       ∃ x, hs = [x] ∧ ∀ V : Header.Value, ascii V.value = x → HostAccepted T V = true)
-    (hexp : v = .v10 ∨ LineVals lines "expect" [])
     (hte : LineVals lines "transfer-encoding" te) (hcl : LineVals lines "content-length" cl)
     (hA : Assigns (v == .v10) te cl body) (hstd : StdFraming te cl)
     (hbody : BodyFits m.config body w d) :
-    ∃ fields, Pairwise2 RecordedLine fields lines ∧
+    ∃ fields b, Pairwise2 RecordedLine fields lines ∧ BodyFits m.config (toBody b) w d ∧
       m.processRead.reader.messageHead = { method := M, version := v, uri := T, headers := headersOf fields } ∧
-      ∃ k m' ps, pullN k m.processRead = (m', ps) ∧ Delivered ps d ∧ m'.reader.state = .complete ∧
-        unread m'.reader.input = rest := by
+      m.processRead.reader.state =
+        afterHead ({ method := M, version := v, uri := T, headers := headersOf fields } : Request.Head) b ∧
+      unread m.processRead.reader.input = w ++ rest ∧ InBounds m.processRead ∧
+      m.processRead.reader.bodyBytesRead = 0 ∧ m.processRead.config = m.config ∧
+      m.processRead.writer.sentMessage = false := by
   obtain ⟨j, fields, he, hju, hjb, hf⟩ := head_read (rest := w ++ rest) hst hib (by rw [hu]; simp)
     h hlen hM hT hver hv hl hn hb
   let mh : Request.Head := { method := M, version := v, uri := T, headers := headersOf fields }
@@ -1092,16 +1084,132 @@ theorem request_read {m : Machine .receiving} {rl mb tb w d rest : List UInt8} {
         exact absurd hc (by decide))
     exact host_ok hhd hf hhs hx
   obtain ⟨hr, hcfg, hsent⟩ := processHeaders_ok M0 (target_ok htarget) hck hgs hmax
-  have hnx : Machine.hasExpectContinue (dir := .receiving) mh = false := noExpect hhd hf hexp
-  have hst1 : (Machine.processHeaders M0).reader.state = .readBody (initBody b) := by
-    rw [hr]; show afterHead mh b = _; simp [afterHead, hnx]
+  have hst1 : (Machine.processHeaders M0).reader.state = afterHead mh b := by rw [hr]; rfl
   have hpr : m.processRead = Machine.processHeaders M0 := by
-    rw [he]; exact processRead_body (M := Machine.processHeaders M0) hst1 (hsent.trans hs)
-  refine ⟨fields, hf, by rw [hpr, hr]; rfl, ?_⟩
+    rw [he]
+    by_cases hx : Machine.hasExpectContinue (dir := .receiving) mh = true
+    · have : (Machine.processHeaders M0).reader.state = .continue (.readBody (initBody b)) := by
+        rw [hst1]; simp [afterHead, hx]
+      exact (processRead_cases _).2.2.2.2.2.1 _ this
+    · have : (Machine.processHeaders M0).reader.state = .readBody (initBody b) := by
+        rw [hst1]; simp [afterHead, hx]
+      exact processRead_body (M := Machine.processHeaders M0) this (hsent.trans hs)
+  refine ⟨fields, b, hf, by rw [hbt]; exact hbody, ?_⟩
   rw [hpr]
-  refine body_pulls (M := Machine.processHeaders M0) (by rw [hcfg, hbt]; exact hbody) hst1
-    (by show (Machine.processHeaders M0).reader.input.idx ≤ _; rw [hr]; exact hjb)
-    (by show unread (Machine.processHeaders M0).reader.input = _; rw [hr]; exact hju)
-    (by show (Machine.processHeaders M0).reader.bodyBytesRead = _; rw [hr]; exact hbb) (hsent.trans hs)
+  refine ⟨by rw [hr]; rfl, hst1, ?_, ?_, ?_, hcfg, hsent.trans hs⟩
+  · show unread (Machine.processHeaders M0).reader.input = _; rw [hr]; exact hju
+  · show (Machine.processHeaders M0).reader.input.idx ≤ _; rw [hr]; exact hjb
+  · show (Machine.processHeaders M0).reader.bodyBytesRead = _; rw [hr]; exact hbb
+
+/-- **The machine reads every request within its limits.** At the start of a request
+(`needStartLine`, nothing sent yet), with the unread bytes a request line `rl`, header lines
+`lines`, `CRLF`, a body `w` and then anything (`rest`): the read loop records the head (method,
+target, version, and each header line in order), and pulls then deliver the body's data `d`,
+complete the body, and leave `rest` unread.
+
+The conditions: the request line and header lines are within the configured limits, of HTTP/1.1
+or HTTP/1.0, with a method `Std.Http` recognizes, a target the URI parser accepts, and ASCII field
+values (`head_read`); the target's form suits the method (`TargetSuits`); in HTTP/1.1, or when a
+Host line is present, there is exactly one Host line and `Std.Http`'s Host check accepts it
+(`HostAccepted`); there is no Expect line (in HTTP/1.1; for requests with one see
+`request_read_continue`); RFC 9112 §6.3 assigns the body length `body` and the request meets
+`Std.Http`'s stricter framing rules (`StdFraming`); and the body is within the body and chunk
+limits (`BodyFits`). -/
+theorem request_read {m : Machine .receiving} {rl mb tb w d rest : List UInt8} {major minor : UInt8}
+    {M : Method} {T : RequestTarget} {v : Version} {lines : List (List UInt8 × List UInt8)}
+    {te cl : List (List UInt8)} {body : HttpSpec.Framing.Body}
+    (hst : m.reader.state = .needStartLine) (hib : InBounds m) (hs : m.writer.sentMessage = false)
+    (hbb : m.reader.bodyBytesRead = 0)
+    (hu : unread m.reader.input = rl ++ (lines.map (·.1 ++ CRLF)).flatten ++ CRLF ++ w ++ rest)
+    (h : HttpSpec.Strict.RequestLineFits (rlim m.config) rl mb tb major minor)
+    (hlen : rl.length ≤ m.config.maxStartLineLength)
+    (hM : Verified.methodOfBytes? mb = some M) (hT : HttpSpec.Strict.parseTarget tb = .ok T)
+    (hver : Version.ofNumber? (major - 0x30).toNat (minor - 0x30).toNat = some v) (hv : v = .v11 ∨ v = .v10)
+    (hl : ∀ l ∈ lines, HeaderLineFits (hlim m.config) l.1 l.2) (hn : lines.length ≤ m.config.maxHeaders)
+    (hb : m.reader.headerBytesRead + ((lines.map (·.1 ++ CRLF)).flatten).length ≤ m.config.maxHeaderBytes)
+    (htarget : TargetSuits M T)
+    (hhost : ∀ hs, LineVals lines "host" hs → (v = .v11 ∨ hs ≠ []) →
+      ∃ x, hs = [x] ∧ ∀ V : Header.Value, ascii V.value = x → HostAccepted T V = true)
+    (hexp : v = .v10 ∨ LineVals lines "expect" [])
+    (hte : LineVals lines "transfer-encoding" te) (hcl : LineVals lines "content-length" cl)
+    (hA : Assigns (v == .v10) te cl body) (hstd : StdFraming te cl)
+    (hbody : BodyFits m.config body w d) :
+    ∃ fields, Pairwise2 RecordedLine fields lines ∧
+      m.processRead.reader.messageHead = { method := M, version := v, uri := T, headers := headersOf fields } ∧
+      ∃ k m' ps, pullN k m.processRead = (m', ps) ∧ Delivered ps d ∧ m'.reader.state = .complete ∧
+        unread m'.reader.input = rest := by
+  obtain ⟨fields, b, hf, hbody', hmh, hst1, hu1, hib1, hbb1, hcfg, hs1⟩ := request_head hst hib hs hbb hu h
+    hlen hM hT hver hv hl hn hb htarget hhost hte hcl hA hstd hbody
+  have hnx : Machine.hasExpectContinue (dir := .receiving)
+      ({ method := M, version := v, uri := T, headers := headersOf fields } : Request.Head) = false :=
+    noExpect rfl hf hexp
+  refine ⟨fields, hf, hmh, body_pulls (by rw [hcfg]; exact hbody') (by rw [hst1]; simp [afterHead, hnx])
+    hib1 hu1 hbb1 hs1⟩
+
+/-- `canContinue .continue` on a machine waiting for it (or already in the body): the reader goes on
+to the body; nothing else that the body pulls depend on changes. -/
+theorem canContinue_go {M1 : Machine .receiving} {mh : Request.Head} {b : Body.Length}
+    (hst : M1.reader.state = afterHead mh b) :
+    (M1.canContinue .continue).reader = { M1.reader with state := .readBody (initBody b) } ∧
+      (M1.canContinue .continue).config = M1.config ∧
+      (M1.canContinue .continue).writer.sentMessage = M1.writer.sentMessage := by
+  unfold Machine.canContinue
+  unfold afterHead at hst
+  have hcc : (Status.continue == Status.continue) = true := by decide
+  split at hst
+  · simp only [hst]
+    simp [hcc, Machine.modifyWriter, Machine.setReaderState, Machine.modifyReader]
+  · simp only [hst]
+    refine ⟨?_, trivial, trivial⟩
+    rw [← hst]
+
+/-- **Requests with `Expect: 100-continue` too.** Under the conditions of `request_read` without the
+one on Expect: the read loop records the head and, if the request expects `100-continue`, waits;
+once the application answers `canContinue .continue` (the server's call when the handler accepts
+the body; on a request that does not wait it changes nothing), pulls deliver the body's data,
+complete the body, and leave `rest` unread. Before that answer the reader is still waiting, and a
+pull hands out nothing. -/
+theorem request_read_continue {m : Machine .receiving} {rl mb tb w d rest : List UInt8} {major minor : UInt8}
+    {M : Method} {T : RequestTarget} {v : Version} {lines : List (List UInt8 × List UInt8)}
+    {te cl : List (List UInt8)} {body : HttpSpec.Framing.Body}
+    (hst : m.reader.state = .needStartLine) (hib : InBounds m) (hs : m.writer.sentMessage = false)
+    (hbb : m.reader.bodyBytesRead = 0)
+    (hu : unread m.reader.input = rl ++ (lines.map (·.1 ++ CRLF)).flatten ++ CRLF ++ w ++ rest)
+    (h : HttpSpec.Strict.RequestLineFits (rlim m.config) rl mb tb major minor)
+    (hlen : rl.length ≤ m.config.maxStartLineLength)
+    (hM : Verified.methodOfBytes? mb = some M) (hT : HttpSpec.Strict.parseTarget tb = .ok T)
+    (hver : Version.ofNumber? (major - 0x30).toNat (minor - 0x30).toNat = some v) (hv : v = .v11 ∨ v = .v10)
+    (hl : ∀ l ∈ lines, HeaderLineFits (hlim m.config) l.1 l.2) (hn : lines.length ≤ m.config.maxHeaders)
+    (hb : m.reader.headerBytesRead + ((lines.map (·.1 ++ CRLF)).flatten).length ≤ m.config.maxHeaderBytes)
+    (htarget : TargetSuits M T)
+    (hhost : ∀ hs, LineVals lines "host" hs → (v = .v11 ∨ hs ≠ []) →
+      ∃ x, hs = [x] ∧ ∀ V : Header.Value, ascii V.value = x → HostAccepted T V = true)
+    (hte : LineVals lines "transfer-encoding" te) (hcl : LineVals lines "content-length" cl)
+    (hA : Assigns (v == .v10) te cl body) (hstd : StdFraming te cl)
+    (hbody : BodyFits m.config body w d) :
+    ∃ fields, Pairwise2 RecordedLine fields lines ∧
+      m.processRead.reader.messageHead = { method := M, version := v, uri := T, headers := headersOf fields } ∧
+      (Machine.hasExpectContinue (dir := .receiving)
+          ({ method := M, version := v, uri := T, headers := headersOf fields } : Request.Head) = true →
+        (∃ s, m.processRead.reader.state = .continue s) ∧ m.processRead.pullNextChunk.2 = none) ∧
+      ∃ k m' ps, pullN k (m.processRead.canContinue .continue) = (m', ps) ∧ Delivered ps d ∧
+        m'.reader.state = .complete ∧ unread m'.reader.input = rest := by
+  obtain ⟨fields, b, hf, hbody', hmh, hst1, hu1, hib1, hbb1, hcfg, hs1⟩ := request_head hst hib hs hbb hu h
+    hlen hM hT hver hv hl hn hb htarget hhost hte hcl hA hstd hbody
+  obtain ⟨hr, hc, hsm⟩ := canContinue_go hst1
+  refine ⟨fields, hf, hmh, ?_, ?_⟩
+  · intro hx
+    have hs' : m.processRead.reader.state = .continue (.readBody (initBody b)) := by
+      rw [hst1]; simp [afterHead, hx]
+    refine ⟨⟨_, hs'⟩, ?_⟩
+    rw [Machine.pullNextChunk]
+    split
+    · next bs h' => rw [hs'] at h'; cases h'
+    · rfl
+  · refine body_pulls (M := m.processRead.canContinue .continue) (by rw [hc, hcfg]; exact hbody')
+      (by rw [hr]) (by show (m.processRead.canContinue .continue).reader.input.idx ≤ _; rw [hr]; exact hib1)
+      (by show unread (m.processRead.canContinue .continue).reader.input = _; rw [hr]; exact hu1)
+      (by show (m.processRead.canContinue .continue).reader.bodyBytesRead = _; rw [hr]; exact hbb1)
+      (hsm.trans hs1)
 
 end HttpSpec.RealBodyComplete
