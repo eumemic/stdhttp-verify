@@ -107,6 +107,8 @@ ambiguity; `spec/Spec/Chunked.lean` states the accepted grammar with this lenien
 
 ## 7. Found while proving: 400 or 414 for a long request-target, depending on read boundaries
 
+Reported as [leanprover/lean4#16035](https://github.com/leanprover/lean4/issues/16035).
+
 A request whose target exceeds `maxUriLength` (default 8192) should get 414 (RFC 9112 §3: a
 server "MUST respond with a 414 (URI Too Long)"). `Std.Http` gives 414 only if the bytes up to
 the parser's `maxUriLength` check (method, SP, 8193 target bytes) have arrived when it parses;

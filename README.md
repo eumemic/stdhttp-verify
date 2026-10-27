@@ -7,7 +7,8 @@ Differential testing and formal verification of Lean's built-in HTTP/1.1 server,
   fix in [#15841](https://github.com/leanprover/lean4/pull/15841). A second, minor one, found while
   proving: a request with an overlong request-target gets 414 or 400 depending on where a read ends
   (RFC 9112 §3 requires 414); the server reads at most 8192 bytes at a time, and in a local test
-  such a request sent in one write got 400. Details in `FINDINGS.md`.
+  such a request sent in one write got 400 —
+  [leanprover/lean4#16035](https://github.com/leanprover/lean4/issues/16035). Details in `FINDINGS.md`.
 - **Proofs** (`spec/`, checked by Lean's kernel): in a patched copy of `Std.Http` (`fix/`), the
   parsers the server runs on request syntax — request line, header lines, chunk-size lines,
   trailer sections — are rewritten as total, end-of-input-strict functions and proven to give the
