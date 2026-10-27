@@ -1,10 +1,12 @@
 import Spec.Real.Segment
+import Spec.Real.Events
 import Spec.Real.Server
 
 /-!
 # Reading in pieces: machine-level relations
 
 `Same m m'`: `m'` is `m` with the same unread bytes at another place and other events.
+`EquivE`: one of these, and the same events apart from requests for more input (`needMoreData`).
 `DeadSame m m'`: `m` is dead (rejected or closed) and `m'` is `m` with any input, events and body-byte
 count; once the reader is dead, `feed` drops new bytes and nothing reads these fields.
 -/
@@ -461,10 +463,80 @@ theorem ext_noMore {y : List UInt8} {a r : Machine .receiving} (h : Ext y a r) :
     r.reader.noMoreInput = a.reader.noMoreInput := by
   obtain ⟨it, -, -, rfl⟩ := h; rfl
 
+/-! ### Events -/
+
+/-- The events other than requests for more input. -/
+def visible (ev : Array (Event .receiving)) : List (Event .receiving) :=
+  ev.toList.filter fun e => match e with | .needMoreData _ => false | _ => true
+
+/-- The same events, apart from requests for more input. -/
+def EvEq (a b : Machine .receiving) : Prop := visible a.events = visible b.events
+
+/-- `Equiv`, and the same events apart from requests for more input. -/
+def EquivE (a b : Machine .receiving) : Prop := Equiv a b ∧ EvEq a b
+
+theorem visible_append (a b : Array (Event .receiving)) :
+    visible (a ++ b) = visible a ++ visible b := by
+  simp [visible, Array.toList_append, List.filter_append]
+
+theorem visible_push_nmd (a : Array (Event .receiving)) (x : Option Nat) :
+    visible (a.push (.needMoreData x)) = visible a := by
+  simp [visible, Array.toList_push, List.filter_append]
+
+/-- On `Same` machines with the same visible events, a read pass adds the same events. -/
+theorem same_ev_processRead {a b : Machine .receiving} (h : Same a b) (he : EvEq a b) :
+    EvEq a.processRead b.processRead := by
+  obtain ⟨it, ev, hu, rfl⟩ := h
+  unfold EvEq at he ⊢
+  simp only [withE_events] at he
+  have h1 := ev_processRead (withI a it) ev
+  have h2 : withE (withI a it) #[] = withI (withE a #[]) it := rfl
+  obtain ⟨it', -, h3⟩ := si_processRead (withE a #[]) it hu
+  have h4 : a.processRead.events = a.events ++ (withE a #[]).processRead.events := ev_processRead a a.events
+  rw [h1, h2, h3, withI_events, h4, visible_append, visible_append, he]
+
+theorem same_ev_fin {a b : Machine .receiving} (h : Same a b) (he : EvEq a b) :
+    EvEq (fin a) (fin b) := by
+  have hs := same_state h
+  unfold fin
+  rw [hs]
+  split
+  · next e _ =>
+    obtain ⟨it, ev, hu, rfl⟩ := h
+    unfold EvEq at he ⊢
+    simp only [withE_events] at he
+    have h1 := handleReaderFailed_ev (withI a it) ev e
+    have h2 : withE (withI a it) #[] = withI (withE a #[]) it := rfl
+    have h3 := withI_handleReaderFailed (withE a #[]) it e
+    have h4 : (a.handleReaderFailed e).events = a.events ++ ((withE a #[]).handleReaderFailed e).events :=
+      handleReaderFailed_ev a a.events e
+    rw [h1, h2, h3, withI_events, h4, visible_append, visible_append, he]
+  · exact he
+
+theorem same_ev_pull {a b : Machine .receiving} (h : Same a b) (he : EvEq a b) :
+    EvEq a.pullNextChunk.1 b.pullNextChunk.1 := by
+  obtain ⟨it, ev, hu, rfl⟩ := h
+  unfold EvEq at he ⊢
+  simp only [withE_events] at he
+  have h1 := ev_pullNextChunk (withI a it) ev
+  have h2 : withE (withI a it) #[] = withI (withE a #[]) it := rfl
+  obtain ⟨it', -, h3⟩ := si_pullNextChunk (withE a #[]) it hu
+  have h4 : a.pullNextChunk.1.events = a.events ++ (withE a #[]).pullNextChunk.1.events :=
+    ev_pullNextChunk a a.events
+  rw [h1, h2, h3]
+  simp only [withI_events]
+  rw [h4, visible_append, visible_append, he]
+
+theorem evEq_of_ext {y : List UInt8} {L R r' : Machine .receiving} (hR : Ext y L R) (hr' : Ext y L r') :
+    EvEq R r' := by
+  obtain ⟨i1, -, -, rfl⟩ := hR
+  obtain ⟨i2, -, -, rfl⟩ := hr'
+  rfl
+
 /-- Both extend the same failed machine. -/
 theorem equiv_failed_ext {y : List UInt8} {L R r' : Machine .receiving} {e : Error}
     (hL : L.reader.state = .failed e) (hR : Ext y L R) (hr' : Ext y L r') :
-    Equiv (fin R) (fin r'.processRead) := by
+    EquivE (fin R) (fin r'.processRead) := by
   have hs := same_of_ext hR hr' (same_refl L)
   have hRs : R.reader.state = .failed e := (ext_state hR).trans hL
   have hr's : r'.reader.state = .failed e := (ext_state hr').trans hL
@@ -472,24 +544,37 @@ theorem equiv_failed_ext {y : List UInt8} {L R r' : Machine .receiving} {e : Err
   have hc : (r'.handleReaderFailed e).reader.state = .closed := by
     rw [HttpSpec.RealSegment.handleReaderFailed_eq]; rfl
   rw [fin_of_not_failed (by rw [hc]; intro e' h; cases h)]
-  exact Or.inl (same_handleReaderFailed hs e)
+  refine ⟨Or.inl (same_handleReaderFailed hs e), ?_⟩
+  obtain ⟨i1, -, -, rfl⟩ := hR
+  obtain ⟨i2, -, -, rfl⟩ := hr'
+  unfold EvEq
+  rw [withI_handleReaderFailed, withI_handleReaderFailed]
+  rfl
 
 /-- Both extend the same machine, on which another pass does nothing. -/
 theorem equiv_idle_ext {y : List UInt8} {L R r' : Machine .receiving} (hR : Ext y L R)
     (hr' : Ext y L r') (hidle : r'.processRead = r') (hnf : ∀ e, L.reader.state ≠ .failed e) :
-    Equiv (fin R) (fin r'.processRead) := by
+    EquivE (fin R) (fin r'.processRead) := by
   rw [hidle, fin_of_not_failed (by rw [ext_state hR]; exact hnf),
     fin_of_not_failed (by rw [ext_state hr']; exact hnf)]
-  exact Or.inl (same_of_ext hR hr' (same_refl L))
+  exact ⟨Or.inl (same_of_ext hR hr' (same_refl L)), evEq_of_ext hR hr'⟩
 
 /-- The first run stopped at `l` for more input; the second run on `l` extended runs the same pass
 as the first run's next pass. -/
 theorem equiv_needMore {y : List UInt8} {l r r' : Machine .receiving}
-    {f : Machine .receiving → Machine .receiving} {ev : Event .receiving}
-    (hr : Ext y l r) (hr' : Ext y (l.addEvent ev) r') (hf : f r = r.processRead) :
-    Equiv (fin (f r)) (fin r'.processRead) := by
+    {f : Machine .receiving → Machine .receiving} {x : Option Nat}
+    (hr : Ext y l r) (hr' : Ext y (l.addEvent (.needMoreData x)) r') (hf : f r = r.processRead) :
+    EquivE (fin (f r)) (fin r'.processRead) := by
   rw [hf]
-  exact Or.inl (same_fin (same_processRead (same_of_ext hr hr' (same_addEvent l ev))))
+  have hs := same_of_ext hr hr' (same_addEvent l _)
+  have he : EvEq r r' := by
+    obtain ⟨i1, -, -, rfl⟩ := hr
+    obtain ⟨i2, -, -, rfl⟩ := hr'
+    unfold EvEq
+    show visible l.events = visible (l.events.push (.needMoreData x))
+    rw [visible_push_nmd]
+  exact ⟨Or.inl (same_fin (same_processRead hs)), same_ev_fin (same_processRead hs)
+    (same_ev_processRead hs he)⟩
 
 theorem processRead_startLine {x : Machine .receiving} (h : x.reader.state = .needStartLine)
     (ha : x.reader.input.atEnd = false) (hn : x.reader.noMoreInput = false) :
@@ -521,7 +606,7 @@ def AbsAt (f : Machine .receiving → Machine .receiving) (l : Machine .receivin
   InBounds l → l.reader.noMoreInput = false → l.writer.sentMessage = false →
     (InBounds (f l) ∧ ∃ w, unread l.reader.input = w ++ unread (f l).reader.input) ∧
     ∀ (y : List UInt8) (r r' : Machine .receiving), Ext y l r → Ext y (f l) r' →
-      Equiv (fin (f r)) (fin r'.processRead)
+      EquivE (fin (f r)) (fin r'.processRead)
 
 def B1 (l : Machine .receiving) : Prop :=
   l.reader.state = .needStartLine → l.reader.input.atEnd = false →
@@ -546,7 +631,7 @@ def B5 : (dir : Direction) → Machine dir → Nat → Nat → String → String
         ∃ w, unread l1.reader.input = w ++ unread (l1.processParsedHeader n start name value).reader.input) ∧
       ∀ (y : List UInt8) (r1 r' : Machine .receiving), Ext y l1 r1 →
         Ext y (l1.processParsedHeader n start name value) r' →
-        Equiv (fin (r1.processParsedHeader n (start + y.length) name value)) (fin r'.processRead)
+        EquivE (fin (r1.processParsedHeader n (start + y.length) name value)) (fin r'.processRead)
   | .sending, _, _, _, _, _ => True
 
 def B6 : (dir : Direction) → Machine dir → Prop
@@ -1939,21 +2024,22 @@ theorem ext_feed {l : Machine .receiving} {d : _root_.ByteArray} (hib : InBounds
   rfl
 
 theorem dead_fin_processRead {L r' : Machine .receiving} (hd : Dead L) {it : It} (h : r' = withI L it) :
-    DeadSame (fin r'.processRead) (fin L.processRead) := by
+    DeadSame (fin r'.processRead) (fin L.processRead) ∧
+      (fin L.processRead).events = (fin r'.processRead).events := by
   subst h
   rcases hd with hs | ⟨e, hs⟩
   · have h1 := (processRead_cases (withI L it)).2.2.2.2.2.2.1 hs
     have h2 := (processRead_cases L).2.2.2.2.2.2.1 hs
     rw [h1, h2, fin_of_not_failed (by rw [withI_state, hs]; intro e h; cases h),
       fin_of_not_failed (by rw [hs]; intro e h; cases h)]
-    exact ⟨Or.inl hs, L.reader.input, L.events, L.reader.bodyBytesRead, rfl⟩
+    exact ⟨⟨Or.inl hs, L.reader.input, L.events, L.reader.bodyBytesRead, rfl⟩, rfl⟩
   · have h1 := (processRead_cases (withI L it)).2.2.2.2.1 e hs
     have h2 := (processRead_cases L).2.2.2.2.1 e hs
     have hc : (L.handleReaderFailed e).reader.state = .closed := by
       rw [HttpSpec.RealSegment.handleReaderFailed_eq]; rfl
     rw [h1, h2, withI_handleReaderFailed, fin_of_not_failed (by rw [withI_state, hc]; intro e h; cases h),
       fin_of_not_failed (by rw [hc]; intro e h; cases h)]
-    exact ⟨Or.inl hc, (L.handleReaderFailed e).reader.input, _, _, rfl⟩
+    exact ⟨⟨Or.inl hc, (L.handleReaderFailed e).reader.input, _, _, rfl⟩, rfl⟩
 
 theorem equiv_deadSame_trans {a b c : Machine .receiving} (h1 : Equiv a b) (h2 : DeadSame b c) :
     Equiv a c := by
@@ -1966,15 +2052,20 @@ theorem equiv_deadSame_trans {a b c : Machine .receiving} (h1 : Equiv a b) (h2 :
   · right
     exact ⟨hda, it2, ev2, b2, rfl⟩
 
+theorem equivE_deadSame_trans {a b c : Machine .receiving} (h1 : EquivE a b) (h2 : DeadSame b c)
+    (he : c.events = b.events) : EquivE a c :=
+  ⟨equiv_deadSame_trans h1.1 h2, by unfold EvEq; rw [he]; exact h1.2⟩
+
 /-- **Reading in two pieces.** Before the end of input is signalled and before a response is sent,
 feeding `x` and running the read loop, then feeding `y` and running it again, ends like feeding
-`x ++ y` and running the read loop once: the same machine up to where the unread bytes sit and the
-event queue (and, once the reader has rejected the input or closed, up to the buffer and the
-body-byte count, which it no longer reads), after finishing any rejection's failure handling. -/
+`x ++ y` and running the read loop once: the same machine up to where the unread bytes sit (and,
+once the reader has rejected the input or closed, up to the buffer and the body-byte count, which it
+no longer reads), with the same events apart from requests for more input, after finishing any
+rejection's failure handling. -/
 theorem read_split (m : Machine .receiving) (x y : _root_.ByteArray) (hib : InBounds m)
     (hn : m.reader.noMoreInput = false) (hsm : m.writer.sentMessage = false) (hd : ¬ Dead m)
     (hbuf : (unread m.reader.input).length + x.size + y.size ≤ Machine.maxBufferedInputBytes m.config) :
-    Equiv (fin (m.feed (x ++ y)).processRead) (fin ((m.feed x).processRead.feed y).processRead) := by
+    EquivE (fin (m.feed (x ++ y)).processRead) (fin ((m.feed x).processRead.feed y).processRead) := by
   have hxy : (x ++ y).size = x.size + y.size := ByteArray.size_append
   rw [feed_live hd hib (by omega), feed_live hd hib (by omega)]
   -- the machine after the first piece
@@ -2005,7 +2096,8 @@ theorem read_split (m : Machine .receiving) (x y : _root_.ByteArray) (hib : InBo
     have hr' : Ext y.data.toList l.processRead
         (withI l.processRead (l.processRead.reader.feed y).input) :=
       ⟨_, unread_readerFeed _ y hibL, by rw [idx_readerFeed]; exact Nat.zero_le _, rfl⟩
-    exact equiv_deadSame_trans (habs _ _ _ hr hr') (dead_fin_processRead hdL rfl)
+    obtain ⟨hds, hev⟩ := dead_fin_processRead hdL (L := l.processRead) (it := (l.processRead.reader.feed y).input) rfl
+    exact equivE_deadSame_trans (habs _ _ _ hr hr') hds hev
   · have hpL : l.processRead.pullBodyStalled = false := by rw [pbs_processRead l hsml, hpl]
     rw [feed_live hdL hibL hbufL]
     exact habs _ _ _ hr (ext_feed hibL hpL)
@@ -2222,9 +2314,10 @@ theorem parseBody_ext {l r : Machine .receiving} {y : List UInt8} {bs : Reader.B
     (∃ l1 r1, l.parseBody bs = (l1, none, true) ∧ r.parseBody bs = (r1, none, true) ∧ Ext y l1 r1 ∧
         InBounds l1 ∧ (∃ w, unread l.reader.input = w ++ unread l1.reader.input) ∧ ChunkBudget l1 ∧
         l1.reader.noMoreInput = false ∧ l1.writer.sentMessage = false) ∨
-      (∃ ev, l.parseBody bs = (l.addEvent ev, none, false)) ∨
+      (∃ x, l.parseBody bs = (l.addEvent (.needMoreData x), none, false)) ∨
       (∃ l1 r1, l.parseBody bs = (l1, none, false) ∧ r.parseBody bs = (r1, none, false) ∧
-        DeadSame l1 r1 ∧ InBounds l1 ∧ ∃ w, unread l.reader.input = w ++ unread l1.reader.input) := by
+        DeadSame l1 r1 ∧ r1.events = l1.events ∧ InBounds l1 ∧
+        ∃ w, unread l.reader.input = w ++ unread l1.reader.input) := by
   obtain ⟨it, hu, hb, rfl⟩ := hx
   have hxr : Ext y l (withI l it) := ⟨it, hu, hb, rfl⟩
   have hrem : it.remainingBytes = l.reader.input.remainingBytes + y.length := by
@@ -2240,7 +2333,7 @@ theorem parseBody_ext {l r : Machine .receiving} {y : List UInt8} {bs : Reader.B
     · exact absurd hnone (hf1 hf)
     · obtain ⟨-, hg2⟩ := emit_nondrain (withI l it) .complete true false #[] ByteSlice.empty true hsm
       right; right
-      exact ⟨_, _, hf2 hf, hg2 hf, deadSame_of_ext (ext_setFailure hxr _) (dead_setFailure _ _),
+      exact ⟨_, _, hf2 hf, hg2 hf, deadSame_of_ext (ext_setFailure hxr _) (dead_setFailure _ _), rfl,
         hib, [], rfl⟩
   · -- a fixed body
     have e : ∀ x : Machine .receiving, x.parseBody (.fixed (n + 1)) = x.parseFixedBody (n + 1) := by
@@ -2263,16 +2356,16 @@ theorem parseBody_ext {l r : Machine .receiving} {y : List UInt8} {bs : Reader.B
         rcases t with d | ⟨d, k⟩ <;> rcases t' with d' | ⟨d', k'⟩ <;> simp only [takeSize] at hge hnone ⊢
         · obtain ⟨e1, e2⟩ := emit_fail_pair (it := it) (j' := j') .complete .complete true true false false true
             true #[] #[] hsm hge hnone
-          exact ⟨_, _, e1, e2, ⟨dead_setFailure _ _, j', _, _, rfl⟩, hibl, w, hw⟩
+          exact ⟨_, _, e1, e2, ⟨dead_setFailure _ _, j', _, _, rfl⟩, rfl, hibl, w, hw⟩
         · obtain ⟨e1, e2⟩ := emit_fail_pair (it := it) (j' := j') .complete (.readBody (.fixed k')) true false
             false false true false #[] #[] hsm hge hnone
-          exact ⟨_, _, e1, e2, ⟨dead_setFailure _ _, j', _, _, rfl⟩, hibl, w, hw⟩
+          exact ⟨_, _, e1, e2, ⟨dead_setFailure _ _, j', _, _, rfl⟩, rfl, hibl, w, hw⟩
         · obtain ⟨e1, e2⟩ := emit_fail_pair (it := it) (j' := j') (.readBody (.fixed k)) .complete false true
             false false false true #[] #[] hsm hge hnone
-          exact ⟨_, _, e1, e2, ⟨dead_setFailure _ _, j', _, _, rfl⟩, hibl, w, hw⟩
+          exact ⟨_, _, e1, e2, ⟨dead_setFailure _ _, j', _, _, rfl⟩, rfl, hibl, w, hw⟩
         · obtain ⟨e1, e2⟩ := emit_fail_pair (it := it) (j' := j') (.readBody (.fixed k)) (.readBody (.fixed k'))
             false false false false false false #[] #[] hsm hge hnone
-          exact ⟨_, _, e1, e2, ⟨dead_setFailure _ _, j', _, _, rfl⟩, hibl, w, hw⟩
+          exact ⟨_, _, e1, e2, ⟨dead_setFailure _ _, j', _, _, rfl⟩, rfl, hibl, w, hw⟩
   · -- a chunk-size line
     have e : ∀ x : Machine .receiving, x.parseBody .chunkedSize = x.parseChunkSizeBody := by
       intro x; simp [Machine.parseBody]
@@ -2295,12 +2388,12 @@ theorem parseBody_ext {l r : Machine .receiving} {y : List UInt8} {bs : Reader.B
       by_cases h1 : size > l1.config.maxChunkSize
       · simp only [h1, ↓reduceIte]
         exact Or.inr (Or.inr ⟨_, _, rfl, rfl, deadSame_of_ext (ext_setFailure ⟨itr, hur, hbr, rfl⟩ _)
-          (dead_setFailure _ _), hib1, w, hw⟩)
+          (dead_setFailure _ _), rfl, hib1, w, hw⟩)
       · simp only [h1, ↓reduceIte]
         by_cases h2 : (!l1.fitsBodyLimit size) = true
         · simp only [h2, ↓reduceIte]
           exact Or.inr (Or.inr ⟨_, _, rfl, rfl, deadSame_of_ext (ext_setFailure ⟨itr, hur, hbr, rfl⟩ _)
-            (dead_setFailure _ _), hib1, w, hw⟩)
+            (dead_setFailure _ _), rfl, hib1, w, hw⟩)
         · simp only [h2, ↓reduceIte, Bool.false_eq_true]
           have hfits : l1.reader.bodyBytesRead + size ≤ l1.config.maxBodySize := by
             unfold Machine.fitsBodyLimit at h2; simpa using h2
@@ -2322,7 +2415,7 @@ theorem parseBody_ext {l r : Machine .receiving} {y : List UInt8} {bs : Reader.B
           (some (withI l it).config.maxChunkLineLength) = ((withI l it).setFailure e', none) := hrr
       rw [hl] at hnone ⊢
       rw [hrr']
-      exact Or.inr (Or.inr ⟨_, _, rfl, rfl, deadSame_of_ext (ext_setFailure hxr _) (dead_setFailure _ _),
+      exact Or.inr (Or.inr ⟨_, _, rfl, rfl, deadSame_of_ext (ext_setFailure hxr _) (dead_setFailure _ _), rfl,
         hib, [], rfl⟩)
   · -- the trailer section after the last chunk
     have e : ∀ x : Machine .receiving, x.parseBody (.chunkedBody ext 0) = x.parseLastChunkBodyState ext := by
@@ -2344,14 +2437,14 @@ theorem parseBody_ext {l r : Machine .receiving} {y : List UInt8} {bs : Reader.B
       obtain ⟨-, hg2⟩ := emit_nondrain (withI l1 itr) .complete true false ext ByteSlice.empty true
         (by obtain ⟨it0, -, hm1⟩ := Machine.parseWith_some hl; rw [hm1]; exact hsm)
       exact Or.inr (Or.inr ⟨_, _, hf2 hf, hg2 hf, deadSame_of_ext (ext_setFailure ⟨itr, hur, hbr, rfl⟩ _)
-        (dead_setFailure _ _), hib1, w, hw⟩)
+        (dead_setFailure _ _), rfl, hib1, w, hw⟩)
     · rw [hB] at hnone ⊢
       exact Or.inr (Or.inl ⟨_, rfl⟩)
     · have hrr' : (withI l it).parseWith (parseLastChunkBody (withI l it).config) none =
           ((withI l it).setFailure e', none) := hrr
       rw [hl] at hnone ⊢
       rw [hrr']
-      exact Or.inr (Or.inr ⟨_, _, rfl, rfl, deadSame_of_ext (ext_setFailure hxr _) (dead_setFailure _ _),
+      exact Or.inr (Or.inr ⟨_, _, rfl, rfl, deadSame_of_ext (ext_setFailure hxr _) (dead_setFailure _ _), rfl,
         hib, [], rfl⟩)
   · -- chunk data
     have e : ∀ x : Machine .receiving, x.parseBody (.chunkedBody ext (n + 1)) =
@@ -2380,7 +2473,7 @@ theorem parseBody_ext {l r : Machine .receiving} {y : List UInt8} {bs : Reader.B
         obtain ⟨j', hp'⟩ := chunkSizedData_other_ext (n + 1) hib hu hp
         have hp'' : parseChunkSizedData (n + 1) (withI l it).reader.input = .error j' (.other msg) := hp'
         rw [parseWith_other l _ _ _ none hp, parseWith_other (withI l it) _ _ _ none hp'']
-        exact Or.inr (Or.inr ⟨_, _, rfl, rfl, deadSame_of_ext (ext_setFailure hxr _) (dead_setFailure _ _),
+        exact Or.inr (Or.inr ⟨_, _, rfl, rfl, deadSame_of_ext (ext_setFailure hxr _) (dead_setFailure _ _), rfl,
           hib, [], rfl⟩)
   · -- a body delimited by the end of the connection
     have e : ∀ x : Machine .receiving, x.parseBody .closeDelimited = x.parseCloseDelimitedBody := by
@@ -2425,7 +2518,7 @@ theorem parseBody_ext {l r : Machine .receiving} {y : List UInt8} {bs : Reader.B
       have hadv : (l.modifyReader fun r => r.advance r.remainingBytes).reader.input =
           l.reader.input.forward l.reader.input.remainingBytes := rfl
       refine Or.inr (Or.inr ⟨_, _, rfl, rfl, ⟨dead_setFailure _ _, it.forward it.remainingBytes, _, _, rfl⟩,
-        ?_, unread l.reader.input, ?_⟩)
+        rfl, ?_, unread l.reader.input, ?_⟩)
       · show (l.reader.input.forward l.reader.input.remainingBytes).idx ≤
           (l.reader.input.forward l.reader.input.remainingBytes).array.size
         have := e1
@@ -2529,7 +2622,7 @@ def PullAbs (l : Machine .receiving) : Prop :=
       l.pullNextChunk.1.config = l.config ∧ l.pullNextChunk.1.pullBodyStalled = l.pullBodyStalled ∧
       l.pullNextChunk.1.writer.sentMessage = l.writer.sentMessage) ∧
     ∀ (y : List UInt8) (r r' : Machine .receiving), Ext y l r → Ext y l.pullNextChunk.1 r' →
-      r.pullNextChunk.2 = r'.pullNextChunk.2 ∧ Equiv r.pullNextChunk.1 r'.pullNextChunk.1
+      r.pullNextChunk.2 = r'.pullNextChunk.2 ∧ EquivE r.pullNextChunk.1 r'.pullNextChunk.1
 
 theorem deadSame_withI {a b : Machine .receiving} (h : DeadSame a b) (it : It) :
     DeadSame b (withI a it) := by
@@ -2583,7 +2676,7 @@ theorem absorb_pull (m : Machine .receiving) : PullAbs m := by
     obtain ⟨hc1, hp1, hwr1⟩ := parseBody_keeps x bs
     rw [hpb] at hc1 hp1 hwr1
     rcases parseBody_ext hst hib hn hsm hbud (ext_refl hib) hn0 with
-      ⟨l1, -, hl, -⟩ | ⟨ev, hl⟩ | ⟨l1, r1, hl, -, hds0, hib1, w1, hw1⟩
+      ⟨l1, -, hl, -⟩ | ⟨ev, hl⟩ | ⟨l1, r1, hl, -, hds0, -, hib1, w1, hw1⟩
     · rw [hpb] at hl
       simp only [Prod.mk.injEq] at hl
       exact absurd hl.2.2 hsc
@@ -2591,15 +2684,21 @@ theorem absorb_pull (m : Machine .receiving) : PullAbs m := by
       simp only [Prod.mk.injEq] at hl
       obtain ⟨rfl, -⟩ := hl
       refine ⟨⟨hib, ⟨[], rfl⟩, rfl, rfl, rfl⟩, fun y r r' hr hr' => ?_⟩
-      have hs := same_of_ext hr hr' (same_addEvent x ev)
+      have hs := same_of_ext hr hr' (same_addEvent x _)
       obtain ⟨h1, h2⟩ := same_pullNextChunk hs
-      exact ⟨h2.symm, Or.inl h1⟩
+      have he : EvEq r r' := by
+        obtain ⟨i1, -, -, rfl⟩ := hr
+        obtain ⟨i2, -, -, rfl⟩ := hr'
+        unfold EvEq
+        show visible x.events = visible (x.events.push (.needMoreData ev))
+        rw [visible_push_nmd]
+      exact ⟨h2.symm, Or.inl h1, same_ev_pull hs he⟩
     · rw [hpb] at hl
       simp only [Prod.mk.injEq] at hl
       obtain ⟨rfl, -⟩ := hl
       refine ⟨⟨hib1, ⟨w1, hw1⟩, hc1, hp1, congrArg (·.sentMessage) hwr1⟩, fun y r r' hr hr' => ?_⟩
       rcases parseBody_ext hst hib hn hsm hbud hr hn0 with
-        ⟨l1', -, hl', -⟩ | ⟨ev, hl'⟩ | ⟨l1', r1', hl', hrr, hds, -⟩
+        ⟨l1', -, hl', -⟩ | ⟨ev, hl'⟩ | ⟨l1', r1', hl', hrr, hds, hevr, -⟩
       · rw [hpb] at hl'; simp only [Prod.mk.injEq] at hl'; exact absurd hl'.2.2 hsc
       · rw [hpb] at hl'
         simp only [Prod.mk.injEq] at hl'
@@ -2613,9 +2712,8 @@ theorem absorb_pull (m : Machine .receiving) : PullAbs m := by
         have hr's : ∀ bs, r'.reader.state ≠ .readBody bs := by
           rw [ext_state hr']; exact not_readBody_of_dead hds.1
         rw [pull_other hr's]
-        refine ⟨rfl, Or.inr ?_⟩
         obtain ⟨it', -, -, rfl⟩ := hr'
-        exact deadSame_withI hds it'
+        exact ⟨rfl, Or.inr (deadSame_withI hds it'), by unfold EvEq; rw [hevr]; rfl⟩
   | case4 x h =>
     intro hib hn hsm hbud hnone
     rw [pull_other h]
@@ -2623,7 +2721,7 @@ theorem absorb_pull (m : Machine .receiving) : PullAbs m := by
     have hrs : ∀ bs, r.reader.state ≠ .readBody bs := by rw [ext_state hr]; exact h
     have hr's : ∀ bs, r'.reader.state ≠ .readBody bs := by rw [ext_state hr']; exact h
     rw [pull_other hrs, pull_other hr's]
-    exact ⟨rfl, Or.inl (same_of_ext hr hr' (same_refl x))⟩
+    exact ⟨rfl, Or.inl (same_of_ext hr hr' (same_refl x)), evEq_of_ext hr hr'⟩
 
 /-! ## Pulling in two pieces -/
 
@@ -2649,21 +2747,26 @@ theorem equiv_stalled {a b : Machine .receiving} (h : Equiv a b) (c : Option Pul
     unfold Dead at hd ⊢
     exact hd
 
+theorem equivE_stalled {a b : Machine .receiving} (h : EquivE a b) (c : Option PulledChunk) :
+    EquivE { a with pullBodyStalled := stalledOf a c } { b with pullBodyStalled := stalledOf b c } :=
+  ⟨equiv_stalled h.1 c, h.2⟩
+
 theorem chunkBudget_feed (m : Machine .receiving) (d : _root_.ByteArray) (h : ChunkBudget m) :
     ChunkBudget { m with reader := m.reader.feed d, pullBodyStalled := false } := h
 
 /-- **Pulling in two pieces.** Before the end of input is signalled and before a response is sent,
 on a machine whose current chunk fits the body limit: if feeding `x` and pulling hands out nothing,
 then feeding `y` and pulling again hands out the same as feeding `x ++ y` and pulling once, and ends
-in the same machine (up to where the unread bytes sit and the event queue, and, once the reader has
-rejected the input or closed, the buffer and the body-byte count). -/
+in the same machine (up to where the unread bytes sit, and, once the reader has rejected the input
+or closed, the buffer and the body-byte count), with the same events apart from requests for more
+input. -/
 theorem pull_split (m : Machine .receiving) (x y : _root_.ByteArray) (hib : InBounds m)
     (hn : m.reader.noMoreInput = false) (hsm : m.writer.sentMessage = false) (hd : ¬ Dead m)
     (hbud : ChunkBudget m)
     (hbuf : (unread m.reader.input).length + x.size + y.size ≤ Machine.maxBufferedInputBytes m.config)
     (hnone : (m.feed x).pullBody.2 = none) :
     (m.feed (x ++ y)).pullBody.2 = ((m.feed x).pullBody.1.feed y).pullBody.2 ∧
-      Equiv (m.feed (x ++ y)).pullBody.1 ((m.feed x).pullBody.1.feed y).pullBody.1 := by
+      EquivE (m.feed (x ++ y)).pullBody.1 ((m.feed x).pullBody.1.feed y).pullBody.1 := by
   have hxy : (x ++ y).size = x.size + y.size := ByteArray.size_append
   rw [feed_live hd hib (by omega), feed_live hd hib (by omega)] at *
   generalize hl : ({ m with reader := m.reader.feed x, pullBodyStalled := false } : Machine .receiving) = l
@@ -2709,7 +2812,7 @@ theorem pull_split (m : Machine .receiving) (x y : _root_.ByteArray) (hib : InBo
     simp only at hc he ⊢
     refine ⟨hc, ?_⟩
     rw [hc]
-    refine equiv_deadSame_trans (equiv_stalled he none) ⟨?_, P1.reader.input, _, _, rfl⟩
+    refine equivE_deadSame_trans (equivE_stalled he none) ⟨?_, P1.reader.input, _, _, rfl⟩ rfl
     unfold Dead at hdP ⊢; exact hdP
   · have hdL : ¬ Dead { P1 with pullBodyStalled := stalledOf P1 none } := by
       unfold Dead at hdP ⊢; exact hdP
@@ -2725,6 +2828,6 @@ theorem pull_split (m : Machine .receiving) (x y : _root_.ByteArray) (hib : InBo
     refine ⟨hc, ?_⟩
     simp only
     rw [← hc]
-    exact equiv_stalled he _
+    exact equivE_stalled he _
 
 end HttpSpec.RealAbsorb
