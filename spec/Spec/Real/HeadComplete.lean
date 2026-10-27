@@ -24,16 +24,21 @@ def hlim (cfg : Protocol.H1.Config) : Verified.TrailerLimits :=
     maxSpaceSequence := cfg.maxSpaceSequence
     maxTrailerHeaders := cfg.maxTrailerHeaders }
 
+/-- `v` is the field value of the header line `x` with name `name` (RFC 9112 §5:
+`field-line = field-name ":" OWS field-value OWS`). -/
+def FieldOf (x name v : List UInt8) : Prop :=
+  ∃ w₁ w, x = name ++ [COLON] ++ w₁ ++ v ++ w ∧ OWS w₁ ∧ OWS w ∧ FieldValue v
+
 /-- The server's header-line parser reads a header line within the limits and decodes it. -/
 theorem acc_parseSingleHeader_line (cfg : Protocol.H1.Config) {x name : List UInt8} (h : HeaderLineFits (hlim cfg) x name)
     (rest : List UInt8) :
     ∃ ns vs N V v, AccAt (parseSingleHeader cfg) (x ++ CRLF) rest (some (ns, vs)) ∧
       Machine.typedHeader? ns vs = some (N, V) ∧ ascii N.value = name.map toLowerAscii ∧
-      ascii V.value = v ∧ FieldValue v := by
-  obtain ⟨value, ⟨v, w, rfl, hv, hva, hw⟩, hacc⟩ := HttpSpec.Strict.acc_singleHeader_line (hlim cfg) h rest
+      ascii V.value = v ∧ FieldOf x name v := by
+  obtain ⟨value, ⟨w₁, v, w, hx, rfl, hw1, hv, hva, hw⟩, hacc⟩ := HttpSpec.Strict.acc_singleHeader_line (hlim cfg) h rest
   obtain ⟨_, _, _, _, hn, -⟩ := h
   obtain ⟨ns, vs, N, V, ht, hty, hN, hV⟩ := typed_of_line hn hv hva hw
-  refine ⟨ns, vs, N, V, v, ?_, hty, hN, hV, hv⟩
+  refine ⟨ns, vs, N, V, v, ?_, hty, hN, hV, w₁, w, hx, hw1, hw, hv⟩
   simp only [parseSingleHeader]
   refine HttpSpec.Strict.acc_bind_nil hacc ?_
   show AccAt (match toHeaderLine name (v ++ w) with
@@ -66,7 +71,7 @@ theorem header_step {M : Machine .receiving} {n : Nat} {x name rest : List UInt8
         { M.reader.messageHead with headers := M.reader.messageHead.headers.insert N V }
         (M.reader.headerBytesRead + (x ++ CRLF).length)).processRead ∧
       unread j = rest ∧ j.idx ≤ j.array.size ∧ ascii N.value = name.map toLowerAscii ∧
-      ascii V.value = v ∧ FieldValue v := by
+      ascii V.value = v ∧ FieldOf x name v := by
   obtain ⟨ns, vs, N, V, v, hacc, hty, hN, hV, hv⟩ := acc_parseSingleHeader_line M.config h rest
   obtain ⟨j, hj, hju, hjb⟩ := hacc M.reader.input hib hu
   refine ⟨j, N, V, v, ?_, hju, hjb, hN, hV, hv⟩
@@ -104,9 +109,10 @@ theorem headers_end {M : Machine .receiving} {n : Nat} {rest : List UInt8}
   rw [← hst]
   rfl
 
-/-- A recorded header and the header line it came from: the name in lowercase, and a field value. -/
+/-- A recorded header and the header line `l.1` (with name `l.2`) it came from: the name in
+lowercase, and the line's field value. -/
 def RecordedLine (f : Header.Name × Header.Value) (l : List UInt8 × List UInt8) : Prop :=
-  ascii f.1.value = l.2.map toLowerAscii ∧ ∃ v, ascii f.2.value = v ∧ FieldValue v
+  ascii f.1.value = l.2.map toLowerAscii ∧ FieldOf l.1 l.2 (ascii f.2.value)
 
 /-- Two lists related elementwise. -/
 inductive Pairwise2 {α β : Type} (R : α → β → Prop) : List α → List β → Prop
@@ -142,7 +148,7 @@ theorem headers_read : ∀ (lines : List (List UInt8 × List UInt8)) (M : Machin
         show M.reader.headerBytesRead + (x ++ CRLF).length + ((lines.map (·.1 ++ CRLF)).flatten).length ≤
           M.config.maxHeaderBytes
         simp only [List.length_append] at hb ⊢; omega)
-    refine ⟨j', (N, V) :: fields, ?_, hju', hjb', .cons ⟨hN, v, hV, hv⟩ hf⟩
+    refine ⟨j', (N, V) :: fields, ?_, hju', hjb', .cons ⟨hN, hV ▸ hv⟩ hf⟩
     rw [he, he']
     have e1 : n + 1 + lines.length = n + ((x, name) :: lines).length := by simp; omega
     have e2 : M.reader.headerBytesRead + (x ++ CRLF).length + ((lines.map (·.1 ++ CRLF)).flatten).length =

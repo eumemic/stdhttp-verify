@@ -781,12 +781,14 @@ def HeaderLineFits (lim : TrailerLimits) (x name : List UInt8) : Prop :=
     (∀ b ∈ v, b < 0x80) ∧ (w₁ ++ w₂).length ≤ lim.maxSpaceSequence ∧
     (v ++ w₂).length ≤ lim.maxHeaderValueLength
 
-/-- The value bytes `fieldLine` returns for a line of the grammar: a field value and whitespace. -/
-def ValueBytes (value : List UInt8) : Prop :=
-  ∃ v w, value = v ++ w ∧ Chunked.FieldValue v ∧ (∀ b ∈ v, b < 0x80) ∧ Chunked.OWS w
+/-- The value bytes `fieldLine` returns for a line `x` of the grammar with name `name`: the line's
+field value `v` and the whitespace after it. -/
+def ValueBytes (x name value : List UInt8) : Prop :=
+  ∃ w₁ v w, x = name ++ [Chunked.COLON] ++ w₁ ++ v ++ w ∧ value = v ++ w ∧ Chunked.OWS w₁ ∧
+    Chunked.FieldValue v ∧ (∀ b ∈ v, b < 0x80) ∧ Chunked.OWS w
 
 theorem acc_fieldLine (lim : TrailerLimits) {x name : List UInt8} (h : HeaderLineFits lim x name)
-    (r : List UInt8) : ∃ value, ValueBytes value ∧ AccAt (fieldLine lim) x (CR :: r) (name, value) := by
+    (r : List UInt8) : ∃ value, ValueBytes x name value ∧ AccAt (fieldLine lim) x (CR :: r) (name, value) := by
   obtain ⟨w₁, v, w₂, rfl, hn, hnl, h1, hv, h2, ha, hs, hvl⟩ := h
   simp only [fieldLine]
   have hfc : ∀ b ∈ v ++ w₂, isFieldContent b = true := by
@@ -796,8 +798,8 @@ theorem acc_fieldLine (lim : TrailerLimits) {x name : List UInt8} (h : HeaderLin
     · exact isFieldContent_of b (Or.inr (h2 b hb)) (by rcases h2 b hb with rfl | rfl <;> decide)
   cases v with
   | nil =>
-    refine ⟨[], ⟨[], [], rfl, ⟨by simp, by simp, by simp⟩, by simp, ows_empty⟩, ?_⟩
     have h12 : Chunked.OWS (w₁ ++ w₂) := OWS_append h1 h2
+    refine ⟨[], ⟨w₁ ++ w₂, [], [], by simp, rfl, h12, ⟨by simp, by simp, by simp⟩, by simp, ows_empty⟩, ?_⟩
     refine acc_cast (show name ++ ([COLON] ++ ((w₁ ++ w₂) ++ ([] ++ ([] ++ [])))) =
       name ++ [Chunked.COLON] ++ w₁ ++ [] ++ w₂ by simp [COLON, Chunked.COLON])
       (acc_bind (acc_token _ hn.1 (tchar_of hn.2) hnl (Or.inr ⟨COLON, _, rfl, colon_not_tchar⟩)) ?_)
@@ -808,7 +810,7 @@ theorem acc_fieldLine (lim : TrailerLimits) {x name : List UInt8} (h : HeaderLin
     refine acc_bind (acc_ows _ (by simp) (by simp) ⟨CR, r, rfl, cr_not_ows⟩) ?_
     exact acc_pure _ _
   | cons b v' =>
-    refine ⟨b :: v' ++ w₂, ⟨b :: v', w₂, rfl, hv, ha, h2⟩, ?_⟩
+    refine ⟨b :: v' ++ w₂, ⟨w₁, b :: v', w₂, by simp, rfl, h1, hv, ha, h2⟩, ?_⟩
     have hb : Chunked.isFieldVChar b = true := hv.2.1 b rfl
     refine acc_cast (show name ++ ([COLON] ++ (w₁ ++ ((b :: v' ++ w₂) ++ ([] ++ [])))) =
       name ++ [Chunked.COLON] ++ w₁ ++ (b :: v') ++ w₂ by simp [COLON, Chunked.COLON])
@@ -823,7 +825,7 @@ theorem acc_fieldLine (lim : TrailerLimits) {x name : List UInt8} (h : HeaderLin
 
 /-- The header-line parser reads a header line within its limits, with its name. -/
 theorem acc_singleHeader_line (lim : TrailerLimits) {x name : List UInt8} (h : HeaderLineFits lim x name)
-    (rest : List UInt8) : ∃ value, ValueBytes value ∧
+    (rest : List UInt8) : ∃ value, ValueBytes x name value ∧
       AccAt (singleHeader lim) (x ++ Chunked.CRLF) rest (some (name, value)) := by
   obtain ⟨value, hvb, hf⟩ := acc_fieldLine lim h (LF :: rest)
   refine ⟨value, hvb, ?_⟩

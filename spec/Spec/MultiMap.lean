@@ -137,4 +137,20 @@ theorem vals_ofList (pairs : List (α × β)) (k : α) :
       (pairs.filter (·.1 == k)).map (·.2) := by
   rw [vals_eq (indexOk_ofList pairs), entries_ofList]
 
+omit [LawfulBEq α] [LawfulHashable α] [Inhabited α] [Inhabited β] in
+/-- `getAll?` is `none` exactly when no values are stored under the key. -/
+theorem getAll?_vals (map : IndexMultiMap α β) (k : α) :
+    map.getAll? k = if vals map k = [] then none else some (vals map k).toArray := by
+  unfold vals
+  simp only [IndexMultiMap.getAll?]
+  split
+  · next hk =>
+    have hne : (map.getAll k hk).toList ≠ [] := by
+      have := (map.validity k hk).1
+      simp only [IndexMultiMap.getAll, ne_eq, Array.toList_eq_nil_iff, ← Array.size_eq_zero_iff,
+        Array.size_mapFinIdx]
+      omega
+    simp [hne]
+  · simp
+
 end HttpSpec.MultiMap
