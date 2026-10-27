@@ -596,18 +596,44 @@ theorem next_facts {c : UInt8} (h : c = Chunked.SEMI ∨ c = CR) :
     isOws c = false ∧ c ≠ Chunked.EQUALS ∧ isTChar c = false := by
   rcases h with rfl | rfl <;> decide
 
+/-- An extension as `chunkSizeLine` returns it: a token name, and a value of quoted-string
+characters (`HTAB`, `SP`, `VCHAR`). -/
+def ExtOk (e : List UInt8 × Option (List UInt8)) : Prop :=
+  (e.1 ≠ [] ∧ ∀ b ∈ e.1, isTChar b = true) ∧ ∀ v, e.2 = some v → ∀ b ∈ v, isQuotedPair b = true
+
+theorem quotedPair_of_tchar : ∀ b, isTChar b = true → isQuotedPair b = true := forall_uint8 (by decide +kernel)
+theorem quotedPair_of_qdtext : ∀ b, isQdText b = true → isQuotedPair b = true := forall_uint8 (by decide +kernel)
+
+theorem unquote_bytes {c : List UInt8} (hq : Chunked.QuotedContent c) (ha : ∀ b ∈ c, b < 0x80) :
+    ∀ b ∈ unquote c, isQuotedPair b = true := by
+  induction hq with
+  | nil => simp [unquote]
+  | @qdtext b r hb hr ih =>
+    rw [unquote_qdtext r (qdtext_ne b hb).1]
+    intro x hx
+    rcases List.mem_cons.mp hx with rfl | hx
+    · exact quotedPair_of_qdtext _ (isQdText_of _ hb (ha _ (by simp)))
+    · exact ih (fun y hy => ha y (by simp [hy])) x hx
+  | @pair b r hb hr ih =>
+    show ∀ x ∈ b :: unquote r, _
+    intro x hx
+    rcases List.mem_cons.mp hx with rfl | hx
+    · exact isQuotedPair_of _ hb (ha _ (by simp))
+    · exact ih (fun y hy => ha y (by simp [hy])) x hx
+
 theorem acc_exts (lim : Limits) : ∀ (k : Nat) (L : List (List UInt8))
     (acc : List (List UInt8 × Option (List UInt8))) (fuel : Nat) (rest : List UInt8), L.length ≤ k →
     (∀ x ∈ L, ItemFits lim x) → (∀ b ∈ L.flatten, b < 0x80) →
     NoLongRun lim.maxSpaceSequence L.flatten → acc.length + L.length ≤ lim.maxChunkExtensions →
-    L.length < fuel →
-    ∃ res, AccAt (manyLoop (optionalUnlessEof (chunkExt lim)) lim.maxChunkExtensions fuel acc) L.flatten
-      (CR :: LF :: rest) res
-  | k, [], acc, fuel, rest, _, _, _, _, _, hf => by
+    L.length < fuel → (∀ e ∈ acc, ExtOk e) →
+    ∃ res, (∀ e ∈ res, ExtOk e) ∧
+      AccAt (manyLoop (optionalUnlessEof (chunkExt lim)) lim.maxChunkExtensions fuel acc) L.flatten
+        (CR :: LF :: rest) res
+  | k, [], acc, fuel, rest, _, _, _, _, _, hf, hA => by
     obtain ⟨f, rfl⟩ : ∃ f, fuel = f + 1 := ⟨fuel - 1, by simp at hf; omega⟩
-    exact ⟨_, acc_manyLoop_end (acc_oue_none (rej_chunkExt_cr lim _))⟩
-  | 0, x :: L', _, _, _, hk, _, _, _, _, _ => by simp at hk
-  | k + 1, x :: L', acc, fuel, rest, hk, hL, ha, hr, hc, hf => by
+    exact ⟨_, fun e he => hA e (List.mem_reverse.mp he), acc_manyLoop_end (acc_oue_none (rej_chunkExt_cr lim _))⟩
+  | 0, x :: L', _, _, _, hk, _, _, _, _, _, _ => by simp at hk
+  | k + 1, x :: L', acc, fuel, rest, hk, hL, ha, hr, hc, hf, hA => by
     obtain ⟨f, rfl⟩ : ∃ f, fuel = f + 1 := ⟨fuel - 1, by simp at hf; omega⟩
     have hL' : ∀ y ∈ L', ItemFits lim y := fun y hy => hL y (by simp [hy])
     have hfl : (x :: L').flatten = x ++ L'.flatten := rfl
@@ -630,12 +656,17 @@ theorem acc_exts (lim : Limits) : ∀ (k : Nat) (L : List (List UInt8))
       rw [← hcr] at hacc
       have hr2 : NoLongRun lim.maxSpaceSequence ((w₁ ++ [Chunked.SEMI] ++ w₂ ++ n ++ w₃ ++ t) ++ L₂.flatten) := by
         simpa [List.append_assoc] using hr
-      obtain ⟨res, hrec⟩ := acc_exts lim k L₂ ((n, none) :: acc) (f + 1 - 1) rest
+      obtain ⟨res, hres, hrec⟩ := acc_exts lim k L₂ ((n, none) :: acc) (f + 1 - 1) rest
         (by rw [hlen2]; simp at hk; omega) hL₂
         (fun b hb => ha b (by simp [hb])) hr2.suffix
         (by rw [hlen2]; simp only [List.length_cons] at hc ⊢; omega)
         (by rw [hlen2]; simp only [List.length_cons] at hf; omega)
-      refine ⟨res, ?_⟩
+        (by
+          intro e he
+          rcases List.mem_cons.mp he with rfl | he
+          · exact ⟨⟨h3.1, tchar_of h3.2⟩, fun v hv => by cases hv⟩
+          · exact hA e he)
+      refine ⟨res, hres, ?_⟩
       have := acc_manyLoop_cons (fuel := f) (acc_oue_some hacc) hcl (by simpa using hrec)
       simpa using this
     | @token w₁ w₂ n w₃ w₄ v h1 h2 h3 h4 h5 h6 h7 h8 =>
@@ -649,10 +680,17 @@ theorem acc_exts (lim : Limits) : ∀ (k : Nat) (L : List (List UInt8))
         (hr.infix (a := w₁ ++ [Chunked.SEMI] ++ w₂ ++ n ++ w₃ ++ [Chunked.EQUALS]) (c := v ++ L'.flatten)
           (by simp) h5)
         hstop
-      obtain ⟨res, hrec⟩ := acc_exts lim k L' ((n, some v) :: acc) (f + 1 - 1) rest
+      obtain ⟨res, hres, hrec⟩ := acc_exts lim k L' ((n, some v) :: acc) (f + 1 - 1) rest
         (by simp at hk; omega) hL' ha' hr.suffix (by simp only [List.length_cons] at hc ⊢; omega)
         (by simp only [List.length_cons] at hf; omega)
-      exact ⟨res, acc_manyLoop_cons (fuel := f) (acc_oue_some hacc) hcl (by simpa using hrec)⟩
+        (by
+          intro e he
+          rcases List.mem_cons.mp he with rfl | he
+          · refine ⟨⟨h3.1, tchar_of h3.2⟩, fun v' hv' => ?_⟩
+            cases hv'
+            exact fun b hb => quotedPair_of_tchar b (tchar_of h7.2 b hb)
+          · exact hA e he)
+      exact ⟨res, hres, acc_manyLoop_cons (fuel := f) (acc_oue_some hacc) hcl (by simpa using hrec)⟩
     | @quoted w₁ w₂ n w₃ w₄ q h1 h2 h3 h4 h5 h6 h7 h8 =>
       have hacc := acc_chunkExt_quoted lim (L'.flatten ++ CR :: LF :: rest) h1 h2 h3 h4 h5 h6 h7
         (fun b hb => ha b (by simp [hb])) h8
@@ -664,10 +702,17 @@ theorem acc_exts (lim : Limits) : ∀ (k : Nat) (L : List (List UInt8))
           ([Chunked.DQUOTE] ++ q ++ [Chunked.DQUOTE]) ++ L'.flatten) (by simp) h4)
         (hr.infix (a := w₁ ++ [Chunked.SEMI] ++ w₂ ++ n ++ w₃ ++ [Chunked.EQUALS])
           (c := ([Chunked.DQUOTE] ++ q ++ [Chunked.DQUOTE]) ++ L'.flatten) (by simp) h5)
-      obtain ⟨res, hrec⟩ := acc_exts lim k L' ((n, some (unquote q)) :: acc) (f + 1 - 1) rest
+      obtain ⟨res, hres, hrec⟩ := acc_exts lim k L' ((n, some (unquote q)) :: acc) (f + 1 - 1) rest
         (by simp at hk; omega) hL' ha' hr.suffix (by simp only [List.length_cons] at hc ⊢; omega)
         (by simp only [List.length_cons] at hf; omega)
-      exact ⟨res, acc_manyLoop_cons (fuel := f) (acc_oue_some hacc) hcl (by simpa using hrec)⟩
+        (by
+          intro e he
+          rcases List.mem_cons.mp he with rfl | he
+          · refine ⟨⟨h3.1, tchar_of h3.2⟩, fun v' hv' => ?_⟩
+            cases hv'
+            exact unquote_bytes h7 (fun b hb => ha b (by simp [hb]))
+          · exact hA e he)
+      exact ⟨res, hres, acc_manyLoop_cons (fuel := f) (acc_oue_some hacc) hcl (by simpa using hrec)⟩
 
 /-! ## The chunk-size line -/
 
@@ -695,7 +740,7 @@ theorem ChunkSizeLineFits.grammar {lim : Limits} {w : List UInt8} {size : Nat}
 /-- **The chunk-size-line parser accepts every chunk-size line within its limits**, whatever
 follows it, with the size the digits denote. -/
 theorem chunkSizeLine_complete (lim : Limits) {w : List UInt8} {size : Nat} (h : ChunkSizeLineFits lim w size)
-    (rest : List UInt8) : ∃ exts, AccAt (chunkSizeLine lim) w rest (size, exts) := by
+    (rest : List UInt8) : ∃ exts, (∀ e ∈ exts, ExtOk e) ∧ AccAt (chunkSizeLine lim) w rest (size, exts) := by
   obtain ⟨digits, L, rfl, hd, hv, hdl, hL, hn, ha, hr⟩ := h
   have hrL : NoLongRun lim.maxSpaceSequence L.flatten := (hr.prefix (t := Chunked.CRLF)).suffix
   obtain ⟨t, L₂, hfl2, ht, -, -, hnext⟩ := items_strip L hL
@@ -703,9 +748,9 @@ theorem chunkSizeLine_complete (lim : Limits) {w : List UInt8} {size : Nat} (h :
   have hhex : StopsAt isHexDig (L.flatten ++ (CR :: LF :: rest)) := by
     rw [hfl2, List.append_assoc, hcr]
     exact stops_after_ows not_hex_of_ows ht (by rcases hcc with rfl | rfl <;> decide)
-  obtain ⟨res, hm⟩ := acc_exts lim L.length L [] (lim.maxChunkExtensions + 1) rest (Nat.le_refl _) hL
-    (fun b hb => ha b (by simp [hb])) hrL (by simpa using hn) (by omega)
-  refine ⟨res, ?_⟩
+  obtain ⟨res, hres, hm⟩ := acc_exts lim L.length L [] (lim.maxChunkExtensions + 1) rest (Nat.le_refl _) hL
+    (fun b hb => ha b (by simp [hb])) hrL (by simpa using hn) (by omega) (by simp)
+  refine ⟨res, hres, ?_⟩
   simp only [chunkSizeLine]
   rw [← hv]
   refine acc_cast (show digits ++ (L.flatten ++ ([CR] ++ ([LF] ++ []))) = digits ++ L.flatten ++ Chunked.CRLF

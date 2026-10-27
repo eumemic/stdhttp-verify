@@ -276,4 +276,63 @@ theorem typed_of_line {name v w₂ : List UInt8} (hn : Token name) (hv : FieldVa
     exact (lower_byte (a1 c hc)).symm
   · rw [ascii_eq, hVv, hcv]
 
+/-! ## Chunk extensions -/
+
+theorem quotedPair_lt : ∀ b, Std.Http.Protocol.H1.Verified.isQuotedPair b = true → b < 0x80 :=
+  HttpSpec.Strict.forall_uint8 (by decide +kernel)
+
+theorem quotedStringChar_byte {c : Char} (hc : c.toNat < 128)
+    (h : Std.Http.Protocol.H1.Verified.isQuotedPair (toByte c) = true) : Char.quotedStringChar c = true :=
+  forall_ascii (P := fun c => Std.Http.Protocol.H1.Verified.isQuotedPair (toByte c) = true →
+    Char.quotedStringChar c = true) (by decide +kernel) hc h
+
+/-- `toChunkExtensions` accepts every list of extensions that `chunkSizeLine` returns on a line of the
+grammar. -/
+theorem toChunkExtensions_some : ∀ (exts : List (List UInt8 × Option (List UInt8)))
+    (acc : Array (Chunk.ExtensionName × Option Chunk.ExtensionValue)), (∀ e ∈ exts, HttpSpec.Strict.ExtOk e) →
+    ∃ r, exts.foldlM (init := acc) (fun acc (p : List UInt8 × Option (List UInt8)) => do
+      let name ← Chunk.ExtensionName.ofString? (← String.fromUTF8? ⟨p.1.toArray⟩)
+      match p.2 with
+      | none => pure (acc.push (name, none))
+      | some v =>
+        let v ← Chunk.ExtensionValue.ofString? (← String.fromUTF8? ⟨v.toArray⟩)
+        pure (acc.push (name, some v))) = some r
+  | [], acc, _ => ⟨acc, rfl⟩
+  | (n, value) :: es, acc, h => by
+    obtain ⟨⟨hne, ht⟩, hv⟩ := h (n, value) (by simp)
+    have hna : ∀ b ∈ n, b < 0x80 := fun b hb => tchar_lt b (HttpSpec.Strict.isTChar_spec _ (ht b hb))
+    obtain ⟨s1, h1, e1, a1⟩ := fromUTF8?_ascii_some hna
+    rw [ascii_eq] at e1
+    have hN : ∃ N, Chunk.ExtensionName.ofString? s1 = some N := by
+      have hvalid : Chunk.IsValidExtensionName s1 := by
+        simp only [Chunk.IsValidExtensionName, isToken, List.isEmpty_iff, decide_eq_true_eq,
+          List.all_eq_true]
+        refine ⟨fun h => hne (by rw [← e1, h]; rfl), fun c hc => ?_⟩
+        have hb : toByte c ∈ n := by rw [← e1]; exact List.mem_map_of_mem hc
+        rw [← tchar_byte (a1 c hc)]; exact HttpSpec.Strict.isTChar_spec _ (ht _ hb)
+      exact ⟨_, dif_pos hvalid⟩
+    obtain ⟨N, hN⟩ := hN
+    cases value with
+    | none =>
+      obtain ⟨r, hr⟩ := toChunkExtensions_some es (acc.push (N, none)) (fun e he => h e (by simp [he]))
+      exact ⟨r, by simp only [List.foldlM_cons, h1, hN, Option.pure_def, Option.bind_eq_bind, Option.bind_some]; exact hr⟩
+    | some v =>
+      have hvb := hv v rfl
+      obtain ⟨s2, h2, e2, a2⟩ := fromUTF8?_ascii_some (fun b hb => quotedPair_lt b (hvb b hb))
+      rw [ascii_eq] at e2
+      have hV : ∃ V, Chunk.ExtensionValue.ofString? s2 = some V := by
+        have hvalid : Chunk.IsValidExtensionValue s2 := by
+          simp only [Chunk.IsValidExtensionValue, List.all_eq_true]
+          intro c hc
+          have hb : toByte c ∈ v := by rw [← e2]; exact List.mem_map_of_mem hc
+          exact quotedStringChar_byte (a2 c hc) (hvb _ hb)
+        exact ⟨_, dif_pos hvalid⟩
+      obtain ⟨V, hV⟩ := hV
+      obtain ⟨r, hr⟩ := toChunkExtensions_some es (acc.push (N, some V)) (fun e he => h e (by simp [he]))
+      exact ⟨r, by simp only [List.foldlM_cons, h1, h2, hN, hV, Option.pure_def, Option.bind_eq_bind, Option.bind_some]; exact hr⟩
+
+theorem toChunkExtensions_ok {exts : List (List UInt8 × Option (List UInt8))}
+    (h : ∀ e ∈ exts, HttpSpec.Strict.ExtOk e) : ∃ r, toChunkExtensions exts = some r :=
+  toChunkExtensions_some exts #[] h
+
 end HttpSpec.RealConvert
