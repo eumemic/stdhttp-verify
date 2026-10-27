@@ -134,4 +134,6 @@ See `spec/README.md`: what is proven about the patched copy (kernel-checked): th
 consistency and soundness, RFC 9112 framing for the whole receiving machine (`no_desync`,
 `pulled_bodies`, `nothing_after_rejection`), and machine-level segmentation independence
 (`read_split`, `pull_split`, and `read_split_drain`, `pull_split_drain` for the body drain after
-an early response), with the conditions each result needs.
+an early response), completeness (`request_read`: every request within the limits is read, with
+`Std.Http`'s deviations from the RFC as explicit conditions), with the conditions each result
+needs.
