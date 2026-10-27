@@ -29,7 +29,11 @@ Differential testing and formal verification of Lean's built-in HTTP/1.1 server,
   then `y` with the read loop run after each ends like feeding `x ++ y` once (`read_split`), and a
   body pull that hands out nothing, followed by more bytes and another pull, hands out the same as
   one pull after all the bytes (`pull_split`); the bug is a counterexample to the latter in the
-  shipped server. See `spec/README.md` for exactly what is proven, under which conditions, and what
+  shipped server. Both hold for every machine the server reaches. After a response has been sent,
+  while the reader discards the rest of the body, the same holds except that the split run can be
+  ahead by some bytes of the current chunk's data (`read_split_drain`, `pull_split_drain`); the
+  read and pull loops then end in the same machine, or both wait with the difference unchanged.
+  See `spec/README.md` for exactly what is proven, under which conditions, and what
   each result trusts.
 
 `fix/` is a modified copy of `Std.Http` from Lean `nightly-2026-10-20` (Copyright Lean FRO, LLC,
