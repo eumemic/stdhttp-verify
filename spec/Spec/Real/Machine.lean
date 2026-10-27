@@ -339,7 +339,7 @@ with). -/
 theorem startLine_step {m m1 : Machine .receiving} {c : List UInt8} {method : Method}
     {uri : RequestTarget} {v : Version} (hib : InBounds m)
     (hok : RequestsG G c m.reader.messageCount ∧ FreshFrom G m.reader.messageCount)
-    (hpw : m.parseWith (parseRequestLineRawVersion m.config) (some m.config.maxStartLineLength) none
+    (hpw : m.parseWith (parseRequestLineRawVersion m.config) none none
       Machine.classifyStartLineHardError = (m1, some (method, uri, some v)))
     (hv : v = .v11 ∨ v = .v10) :
     InBounds ((m1.modifyReader (Reader.setMessageHead { method, version := v, uri })).setReaderState
@@ -1271,13 +1271,21 @@ theorem processRead_cases (m : Machine .receiving) :
 
 theorem processRead_pres (m : Machine .receiving) : Pres G Machine.processRead m := by
   show M2 .receiving m
-  apply Machine.processRead.induct (motive1 := M1) (motive2 := M2) (motive3 := M3) (motive4 := M4)
+  apply Machine.processRead.induct (motive1 := M1 (G := G)) (motive2 := M2) (motive3 := M3) (motive4 := M4)
     (motive5 := M5) (motive6 := M6) (motive7 := fun _ => True)
-  -- processReceivingStartLine: HTTP/1.1
-  · intro machine m1 method uri hpw ih hst c hib hok
+  -- processReceivingStartLine: the line is longer than `maxStartLineLength`
+  · intro machine start m1 method uri version hlen hpw hst c hib hok
+    have e : machine.processReceivingStartLine = machine.setFailure .badMessage := by
+      rw [Machine.processReceivingStartLine]; simp only [hpw]; exact if_pos hlen
+    rw [e]
+    obtain ⟨hi, _, _⟩ := rok_setFailure machine .badMessage
+    exact ⟨by unfold InBounds at hib ⊢; rw [hi]; exact hib, c, by simp [rem, hi],
+      ok_failed (e := .badMessage) rfl⟩
+  -- HTTP/1.1
+  · intro machine start m1 method uri hlen hpw ih hst c hib hok
     have e : machine.processReceivingStartLine = Machine.processRead ((m1.modifyReader
         (Reader.setMessageHead { method, version := .v11, uri })).setReaderState (.needHeader 0)) := by
-      rw [Machine.processReceivingStartLine]; simp only [hpw]
+      rw [Machine.processReceivingStartLine]; simp only [hpw]; exact if_neg hlen
     rw [e]
     have hc : RequestsG G c machine.reader.messageCount ∧ FreshFrom G machine.reader.messageCount := by
       unfold Ok at hok; rw [hst] at hok; exact hok
@@ -1285,10 +1293,10 @@ theorem processRead_pres (m : Machine .receiving) : Pres G Machine.processRead m
     obtain ⟨hib3, c3, hc3, hok3⟩ := ih c2 hib2 hok2
     exact ⟨hib3, c3, by rw [hc2, hc3], hok3⟩
   -- HTTP/1.0
-  · intro machine m1 method uri hpw ih hst c hib hok
+  · intro machine start m1 method uri hlen hpw ih hst c hib hok
     have e : machine.processReceivingStartLine = Machine.processRead ((m1.modifyReader
         (Reader.setMessageHead { method, version := .v10, uri })).setReaderState (.needHeader 0)) := by
-      rw [Machine.processReceivingStartLine]; simp only [hpw]
+      rw [Machine.processReceivingStartLine]; simp only [hpw]; exact if_neg hlen
     rw [e]
     have hc : RequestsG G c machine.reader.messageCount ∧ FreshFrom G machine.reader.messageCount := by
       unfold Ok at hok; rw [hst] at hok; exact hok
@@ -1296,9 +1304,10 @@ theorem processRead_pres (m : Machine .receiving) : Pres G Machine.processRead m
     obtain ⟨hib3, c3, hc3, hok3⟩ := ih c2 hib2 hok2
     exact ⟨hib3, c3, by rw [hc2, hc3], hok3⟩
   -- another version: unsupported
-  · intro machine m1 method uri version hv11 hv10 hpw hst c hib hok
+  · intro machine start m1 method uri version hlen hv11 hv10 hpw hst c hib hok
     have e : machine.processReceivingStartLine = m1.setFailure .unsupportedVersion := by
-      rw [Machine.processReceivingStartLine]; simp only [hpw]; try (split <;> simp_all)
+      rw [Machine.processReceivingStartLine]; simp only [hpw]; rw [if_neg hlen]
+      try (split <;> simp_all)
     rw [e]
     obtain ⟨it, hit, rfl⟩ := Machine.parseWith_some hpw
     obtain ⟨hib', w, hw, _⟩ := consume (sound_parseRequestLineRawVersion _) hib hit
@@ -1312,7 +1321,7 @@ theorem processRead_pres (m : Machine .receiving) : Pres G Machine.processRead m
       rw [Machine.processReceivingStartLine]; simp only [hpw]
     rw [e]
     have hs := parseWith_none (m := machine) (p := parseRequestLineRawVersion machine.config)
-      (limit := some machine.config.maxStartLineLength) (expect := none)
+      (limit := none) (expect := none)
       (onHardError := Machine.classifyStartLineHardError) (by rw [hpw])
     rw [hpw] at hs
     exact stays_inv hs hib hok

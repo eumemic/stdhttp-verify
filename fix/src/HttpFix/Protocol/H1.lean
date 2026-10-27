@@ -1806,22 +1806,30 @@ Parses one request start-line in server mode and initializes `reader.messageHead
 for header parsing.
 -/
 def processReceivingStartLine (machine : Machine .receiving) : Machine .receiving :=
-  let (machine, result) := parseWith machine
+  -- `maxStartLineLength` is checked on the complete line only. Checking it on an incomplete line
+  -- made the status depend on where a read ended: a long request-target got 414 in one read and
+  -- 400 when a read ended within the last few bytes before the parser's `maxUriLength` check. The
+  -- parser's own limits (leading empty lines, method, `maxUriLength`) bound an incomplete line.
+  let start := machine.reader.input.remainingBytes
+  let (parsed, result) := parseWith machine
     (parseRequestLineRawVersion machine.config)
-    (limit := some machine.config.maxStartLineLength)
+    (limit := none)
     (onHardError := classifyStartLineHardError)
 
   match result with
   | some (method, uri, version) =>
+    if start - parsed.reader.input.remainingBytes > machine.config.maxStartLineLength then
+      machine.setFailure .badMessage
+    else
     match version with
     | some (v@Version.v11) | some (v@Version.v10) =>
-      machine
+      parsed
       |>.modifyReader (.setMessageHead { method, version := v, uri, headers := .empty })
       |>.setReaderState (.needHeader 0)
       |> processRead
-    | _ => machine.setFailure .unsupportedVersion
+    | _ => parsed.setFailure .unsupportedVersion
   | none =>
-    machine
+    parsed
 termination_by (3, 0, 0, 0, 1)
 decreasing_by all_goals (simp_wf; simp [setReaderState, modifyReader, readerPhase, Prod.lex_def])
 
