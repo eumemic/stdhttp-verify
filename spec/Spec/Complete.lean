@@ -521,6 +521,14 @@ theorem acc_manyLoop_cons {p : Parser (Option α)} {max fuel : Nat} {acc : List 
   · show AccAt (if acc.length + 1 > max then fail _ else manyLoop p max fuel (x :: acc)) w' rest res
     exact acc_ite_neg (by omega) hrec
 
+/-- The end of the items, where the item parser reads `w` and returns `none`. -/
+theorem acc_manyLoop_end' {p : Parser (Option α)} {max fuel : Nat} {acc : List α} {w rest : List UInt8}
+    (hp : AccAt p w rest none) : AccAt (manyLoop p max (fuel + 1) acc) [] (w ++ rest) acc.reverse := by
+  simp only [manyLoop]
+  refine acc_bind0 (acc_oue_none ?_) (acc_pure _ _)
+  rw [List.nil_append]
+  exact rej_bind_after hp (rej_fail _ _)
+
 theorem acc_manyLoop_end {p : Parser (Option α)} {max fuel : Nat} {acc : List α} {rest : List UInt8}
     (hp : AccAt p [] rest none) : AccAt (manyLoop p max (fuel + 1) acc) [] rest acc.reverse := by
   simp only [manyLoop]
@@ -704,6 +712,261 @@ theorem chunkSizeLine_complete (lim : Limits) {w : List UInt8} {size : Nat} (h :
     by simp [Chunked.CRLF, CR, LF, Chunked.CR, Chunked.LF]) (acc_bind (acc_hex hd hdl ?_) ?_)
   · simpa using hhex
   refine acc_bind (show AccAt (manyItems _ _) _ _ _ from hm) ?_
+  refine acc_bind (acc_pbyte _ _) ?_
+  refine acc_bind (acc_pbyte _ _) ?_
+  exact acc_pure _ _
+
+/-! ## Header lines and the trailer section -/
+
+theorem isFieldContent_of : ∀ b, (Chunked.isFieldVChar b = true ∨ b = Chunked.SP ∨ b = Chunked.HTAB) →
+    b < 0x80 → isFieldContent b = true := forall_uint8 (by decide +kernel)
+
+theorem fieldVChar_not_ows : ∀ b, Chunked.isFieldVChar b = true → isOws b = false :=
+  forall_uint8 (by decide +kernel)
+
+theorem cr_not_fieldContent : isFieldContent CR = false := by decide
+theorem colon_not_tchar : isTChar COLON = false := by decide
+theorem colon_not_ows : isOws COLON = false := by decide
+
+/-- A header line `name ":" w₁ value w₂` within the limits `lim`: the value is ASCII, and its
+bytes with the trailing whitespace fit `maxHeaderValueLength`. -/
+def HeaderLineFits (lim : TrailerLimits) (x name : List UInt8) : Prop :=
+  ∃ w₁ v w₂, x = name ++ [Chunked.COLON] ++ w₁ ++ v ++ w₂ ∧ Chunked.Token name ∧
+    name.length ≤ lim.maxHeaderNameLength ∧ Chunked.OWS w₁ ∧ Chunked.FieldValue v ∧ Chunked.OWS w₂ ∧
+    (∀ b ∈ v, b < 0x80) ∧ (w₁ ++ w₂).length ≤ lim.maxSpaceSequence ∧
+    (v ++ w₂).length ≤ lim.maxHeaderValueLength
+
+theorem acc_fieldLine (lim : TrailerLimits) {x name : List UInt8} (h : HeaderLineFits lim x name)
+    (r : List UInt8) : ∃ value, AccAt (fieldLine lim) x (CR :: r) (name, value) := by
+  obtain ⟨w₁, v, w₂, rfl, hn, hnl, h1, hv, h2, ha, hs, hvl⟩ := h
+  simp only [fieldLine]
+  have hfc : ∀ b ∈ v ++ w₂, isFieldContent b = true := by
+    intro b hb
+    rcases List.mem_append.mp hb with hb | hb
+    · exact isFieldContent_of b (hv.1 b hb) (ha b hb)
+    · exact isFieldContent_of b (Or.inr (h2 b hb)) (by rcases h2 b hb with rfl | rfl <;> decide)
+  cases v with
+  | nil =>
+    refine ⟨[], ?_⟩
+    have h12 : Chunked.OWS (w₁ ++ w₂) := OWS_append h1 h2
+    refine acc_cast (show name ++ ([COLON] ++ ((w₁ ++ w₂) ++ ([] ++ ([] ++ [])))) =
+      name ++ [Chunked.COLON] ++ w₁ ++ [] ++ w₂ by simp [COLON, Chunked.COLON])
+      (acc_bind (acc_token _ hn.1 (tchar_of hn.2) hnl (Or.inr ⟨COLON, _, rfl, colon_not_tchar⟩)) ?_)
+    refine acc_bind (acc_pbyte _ _) ?_
+    refine acc_bind (acc_ows _ (ows_of h12) hs ⟨CR, r, rfl, cr_not_ows⟩) ?_
+    refine acc_bind (acc_takeUpTo isFieldContent _ [] _ (by simp) (by simp)
+      (Or.inr ⟨CR, r, rfl, cr_not_fieldContent⟩)) ?_
+    refine acc_bind (acc_ows _ (by simp) (by simp) ⟨CR, r, rfl, cr_not_ows⟩) ?_
+    exact acc_pure _ _
+  | cons b v' =>
+    refine ⟨b :: v' ++ w₂, ?_⟩
+    have hb : Chunked.isFieldVChar b = true := hv.2.1 b rfl
+    refine acc_cast (show name ++ ([COLON] ++ (w₁ ++ ((b :: v' ++ w₂) ++ ([] ++ [])))) =
+      name ++ [Chunked.COLON] ++ w₁ ++ (b :: v') ++ w₂ by simp [COLON, Chunked.COLON])
+      (acc_bind (acc_token _ hn.1 (tchar_of hn.2) hnl (Or.inr ⟨COLON, _, rfl, colon_not_tchar⟩)) ?_)
+    refine acc_bind (acc_pbyte _ _) ?_
+    refine acc_bind (acc_ows _ (ows_of h1) (by simp at hs; omega)
+      ⟨b, v' ++ w₂ ++ CR :: r, by simp, fieldVChar_not_ows b hb⟩) ?_
+    refine acc_bind (acc_takeUpTo isFieldContent _ (b :: v' ++ w₂) _ hfc hvl
+      (Or.inr ⟨CR, r, rfl, cr_not_fieldContent⟩)) ?_
+    refine acc_bind (acc_ows _ (by simp) (by simp) ⟨CR, r, rfl, cr_not_ows⟩) ?_
+    exact acc_pure _ _
+
+/-- The header-line parser reads a header line within its limits, with its name. -/
+theorem acc_singleHeader_line (lim : TrailerLimits) {x name : List UInt8} (h : HeaderLineFits lim x name)
+    (rest : List UInt8) : ∃ value, AccAt (singleHeader lim) (x ++ Chunked.CRLF) rest (some (name, value)) := by
+  obtain ⟨value, hf⟩ := acc_fieldLine lim h (LF :: rest)
+  refine ⟨value, ?_⟩
+  obtain ⟨w₁, v, w₂, rfl, hn, -⟩ := h
+  obtain ⟨b, nr, rfl, hb⟩ := token_head hn
+  simp only [singleHeader]
+  have hne : ¬ (b = CR ∨ b = LF) := by
+    rintro (rfl | rfl) <;> exact absurd hb (by decide)
+  refine acc_cast (show [] ++ ((b :: nr ++ [Chunked.COLON] ++ w₁ ++ v ++ w₂) ++ ([CR] ++ ([LF] ++ []))) =
+    (b :: nr ++ [Chunked.COLON] ++ w₁ ++ v ++ w₂) ++ Chunked.CRLF by
+      simp [Chunked.CRLF, CR, LF, Chunked.CR, Chunked.LF]) (acc_bind (acc_peek b _) ?_)
+  refine acc_ite_neg hne ?_
+  refine acc_bind hf ?_
+  refine acc_bind (acc_pbyte _ _) ?_
+  refine acc_bind (acc_pbyte _ _) ?_
+  exact acc_pure _ _
+
+/-- The header-line parser reads the `CRLF` that ends the header section. -/
+theorem acc_singleHeader_end (lim : TrailerLimits) (rest : List UInt8) :
+    AccAt (singleHeader lim) Chunked.CRLF rest none := by
+  simp only [singleHeader]
+  refine acc_cast (show [] ++ ([CR] ++ ([LF] ++ [])) = Chunked.CRLF by
+    simp [Chunked.CRLF, CR, LF, Chunked.CR, Chunked.LF]) (acc_bind (acc_peek CR (LF :: rest)) ?_)
+  refine acc_ite_pos (Or.inl rfl) ?_
+  refine acc_bind (acc_pbyte _ _) ?_
+  refine acc_bind (acc_pbyte _ _) ?_
+  exact acc_pure _ _
+
+/-- A trailer line within the limits: a header line whose name may appear in trailers. -/
+def TrailerLineFits (lim : TrailerLimits) (x : List UInt8) : Prop :=
+  ∃ l name, x = l ++ Chunked.CRLF ∧ HeaderLineFits lim l name ∧ isForbiddenTrailer name = false
+
+theorem acc_trailers (lim : TrailerLimits) : ∀ (items : List (List UInt8))
+    (acc : List (List UInt8 × List UInt8)) (fuel : Nat) (rest : List UInt8),
+    (∀ x ∈ items, TrailerLineFits lim x) → acc.length + items.length ≤ lim.maxTrailerHeaders →
+    items.length < fuel →
+    ∃ res, AccAt (manyLoop (trailerHeader lim) lim.maxTrailerHeaders fuel acc) items.flatten
+      (Chunked.CRLF ++ rest) res
+  | [], acc, fuel, rest, _, _, hf => by
+    obtain ⟨f, rfl⟩ : ∃ f, fuel = f + 1 := ⟨fuel - 1, by simp at hf; omega⟩
+    refine ⟨_, acc_manyLoop_end' ?_⟩
+    simp only [trailerHeader]
+    exact acc_bind_nil (acc_singleHeader_end lim rest) (acc_pure _ _)
+  | x :: items, acc, fuel, rest, hall, hc, hf => by
+    obtain ⟨f, rfl⟩ : ∃ f, fuel = f + 1 := ⟨fuel - 1, by simp at hf; omega⟩
+    obtain ⟨l, name, rfl, hl, hfb⟩ := hall x (by simp)
+    obtain ⟨value, hacc⟩ := acc_singleHeader_line lim hl (items.flatten ++ Chunked.CRLF ++ rest)
+    have htr : AccAt (trailerHeader lim) (l ++ Chunked.CRLF) (items.flatten ++ Chunked.CRLF ++ rest)
+        (some (name, value)) := by
+      simp only [trailerHeader]
+      refine acc_bind_nil hacc ?_
+      exact acc_ite_neg (by simp [hfb]) (acc_pure _ _)
+    obtain ⟨res, hrec⟩ := acc_trailers lim items ((name, value) :: acc) f rest
+      (fun y hy => hall y (by simp [hy])) (by simp at hc ⊢; omega) (by simp at hf; omega)
+    exact ⟨res, acc_manyLoop_cons (by simpa using htr) (by simp at hc; omega) hrec⟩
+
+theorem HeaderLineFits.grammar {lim : TrailerLimits} {x name : List UInt8} (h : HeaderLineFits lim x name) :
+    Chunked.FieldLine x := by
+  obtain ⟨w₁, v, w₂, rfl, hn, -, h1, hv, h2, -⟩ := h
+  exact .mk hn h1 hv h2
+
+/-- **The trailer parser accepts every trailer section within its limits**: at most
+`maxTrailerHeaders` field lines, each within the header-line limits and with a name allowed in
+trailers, then the `CRLF` that ends the chunked body. -/
+theorem lastChunkBody_complete (lim : TrailerLimits) {items : List (List UInt8)}
+    (hall : ∀ x ∈ items, TrailerLineFits lim x) (hn : items.length ≤ lim.maxTrailerHeaders) (rest : List UInt8) :
+    AccAt (lastChunkBody lim) (items.flatten ++ Chunked.CRLF) rest () := by
+  obtain ⟨res, hm⟩ := acc_trailers lim items [] (lim.maxTrailerHeaders + 1) rest hall (by simpa using hn)
+    (by omega)
+  simp only [lastChunkBody]
+  refine acc_cast (show items.flatten ++ ([CR] ++ ([LF] ++ [])) = items.flatten ++ Chunked.CRLF by
+    simp [Chunked.CRLF, CR, LF, Chunked.CR, Chunked.LF]) (acc_bind (a := res) ?_ ?_)
+  · show AccAt (manyLoop (trailerHeader lim) lim.maxTrailerHeaders (lim.maxTrailerHeaders + 1) [])
+      items.flatten _ res
+    simpa [Chunked.CRLF, CR, LF, Chunked.CR, Chunked.LF] using hm
+  refine acc_bind (acc_pbyte _ _) ?_
+  refine acc_bind (acc_pbyte _ _) ?_
+  exact acc_pure _ _
+
+/-! ## The request line -/
+
+theorem acc_skipEmptyLines (max : Nat) {e : List UInt8} (he : EmptyLines e) :
+    ∀ (fuel count : Nat) (b : UInt8) (r : List UInt8), b ≠ CR → 2 * count + e.length ≤ 2 * max →
+      e.length < 2 * fuel → AccAt (skipEmptyLines max fuel count) e (b :: r) () := by
+  induction he with
+  | nil =>
+    intro fuel count b r hb _ hf
+    obtain ⟨f, rfl⟩ : ∃ f, fuel = f + 1 := ⟨fuel - 1, by simp at hf; omega⟩
+    simp only [skipEmptyLines]
+    exact acc_bind0 (acc_peek b r) (acc_ite_neg hb (acc_pure _ _))
+  | @cons l hl ih =>
+    intro fuel count b r hb hc hf
+    obtain ⟨f, rfl⟩ : ∃ f, fuel = f + 1 := ⟨fuel - 1, by simp [Chunked.CRLF] at hf; omega⟩
+    simp only [skipEmptyLines]
+    have hlen : (Chunked.CRLF ++ l).length = l.length + 2 := by simp [Chunked.CRLF]
+    refine acc_cast (show [] ++ ([CR] ++ ([LF] ++ l)) = Chunked.CRLF ++ l by
+      simp [Chunked.CRLF, CR, LF, Chunked.CR, Chunked.LF]) (acc_bind (acc_peek CR _) ?_)
+    refine acc_ite_pos rfl ?_
+    refine acc_ite_neg (by omega) ?_
+    refine acc_bind (acc_pbyte _ _) ?_
+    refine acc_bind (acc_pbyte _ _) ?_
+    exact ih f (count + 1) b r hb (by omega) (by omega)
+
+theorem sp_not_tchar : isTChar SP = false := by decide
+
+theorem acc_method {m : List UInt8} {M : Std.Http.Method} (rest : List UInt8) (hm : Chunked.Token m)
+    (hl : m.length ≤ 64) (hM : methodOfBytes? m = some M) :
+    AccAt method m (SP :: rest) M := by
+  simp only [method]
+  refine acc_bind_nil (acc_token 64 hm.1 (tchar_of hm.2) hl (Or.inr ⟨SP, rest, rfl, sp_not_tchar⟩)) ?_
+  rw [hM]
+  exact acc_pure _ _
+
+theorem vchar_ne_sp : ∀ b, isVChar b = true → (b != SP) = true := forall_uint8 (by decide +kernel)
+
+theorem acc_rawUri (max : Nat) {t : List UInt8} (rest : List UInt8) (ht : ∀ b ∈ t, isVChar b = true)
+    (hl : t.length ≤ max) : AccAt (rawUri max) t (SP :: rest) t := by
+  simp only [rawUri]
+  refine acc_bind_nil (acc_takeUpTo (· != SP) max t _ (fun b hb => vchar_ne_sp b (ht b hb)) hl
+    (Or.inr ⟨SP, rest, rfl, by decide⟩)) ?_
+  by_cases he : (t.length == max) = true
+  · refine acc_ite_pos he ?_
+    refine acc_bind0 (acc_peek SP rest) ?_
+    exact acc_ite_neg (by decide) (acc_pure _ _)
+  · exact acc_ite_neg he (acc_pure _ _)
+
+theorem acc_digitByte {d : UInt8} (rest : List UInt8) (hd : Chunked.isDigit d = true) :
+    AccAt digitByte [d] rest d := by
+  simp only [digitByte]
+  refine acc_attempt (acc_bind_nil (acc_any d rest) ?_)
+  exact acc_ite_pos (by simpa [Chunked.isDigit] using hd) (acc_pure _ _)
+
+theorem acc_httpVersionNumber {major minor : UInt8} (rest : List UInt8) (h1 : Chunked.isDigit major = true)
+    (h2 : Chunked.isDigit minor = true) :
+    AccAt httpVersionNumber (Chunked.ascii "HTTP/" ++ [major] ++ Chunked.ascii "." ++ [minor]) rest
+      ((major - 0x30).toNat, (minor - 0x30).toNat) := by
+  have e1 : Chunked.ascii "HTTP/" = [72, 84, 84, 80, 47] := by decide
+  have e2 : Chunked.ascii "." = [46] := by decide
+  rw [e1, e2]
+  simp only [httpVersionNumber]
+  refine acc_cast (show [72] ++ ([84] ++ ([84] ++ ([80] ++ ([47] ++ ([major] ++ ([46] ++ ([minor] ++ [])))))))
+    = [72, 84, 84, 80, 47] ++ [major] ++ [46] ++ [minor] by simp) (acc_bind (acc_pbyte _ _) ?_)
+  refine acc_bind (acc_pbyte _ _) ?_
+  refine acc_bind (acc_pbyte _ _) ?_
+  refine acc_bind (acc_pbyte _ _) ?_
+  refine acc_bind (acc_pbyte _ _) ?_
+  refine acc_bind (acc_digitByte _ h1) ?_
+  refine acc_bind (acc_pbyte _ _) ?_
+  refine acc_bind (acc_digitByte _ h2) ?_
+  exact acc_pure _ _
+
+/-- A request line within the limits `lim`: at most `maxLeadingEmptyLines` empty lines before it, a
+method of at most 64 bytes, and a request-target of at most `maxUriLength` bytes. -/
+def RequestLineFits (lim : RequestLineLimits) (w m t : List UInt8) (major minor : UInt8) : Prop :=
+  ∃ e, EmptyLines e ∧ e.length ≤ 2 * lim.maxLeadingEmptyLines ∧ Chunked.Token m ∧ m.length ≤ 64 ∧
+    t ≠ [] ∧ (∀ b ∈ t, isVChar b = true) ∧ t.length ≤ lim.maxUriLength ∧
+    Chunked.isDigit major = true ∧ Chunked.isDigit minor = true ∧
+    w = e ++ m ++ [Chunked.SP] ++ t ++ [Chunked.SP] ++ Chunked.ascii "HTTP/" ++ [major] ++
+      Chunked.ascii "." ++ [minor] ++ Chunked.CRLF
+
+theorem RequestLineFits.grammar {lim : RequestLineLimits} {w m t : List UInt8} {major minor : UInt8}
+    (h : RequestLineFits lim w m t major minor) : RequestLineBytes w m t major minor := by
+  obtain ⟨e, he, -, hm, -, ht, htv, -, h1, h2, hw⟩ := h
+  exact ⟨e, he, hm, ht, htv, h1, h2, hw⟩
+
+/-- **The request-line parser accepts every request line within its limits** whose method is one
+`Std.Http` recognizes and whose request-target the URI parser accepts; it returns that method,
+that target and the version. -/
+theorem requestLine_complete (lim : RequestLineLimits) {w m t : List UInt8} {major minor : UInt8}
+    (h : RequestLineFits lim w m t major minor) {M : Std.Http.Method} (hM : methodOfBytes? m = some M)
+    {T : Std.Http.RequestTarget} (hT : parseTarget t = .ok T) (rest : List UInt8) :
+    AccAt (requestLine lim) w rest
+      (M, T, Std.Http.Version.ofNumber? (major - 0x30).toNat (minor - 0x30).toNat) := by
+  obtain ⟨e, he, hel, hm, hml, ht, htv, htl, h1, h2, rfl⟩ := h
+  obtain ⟨b, mr, rfl, hb⟩ := token_head hm
+  simp only [requestLine]
+  have hbcr : b ≠ CR := by intro h; rw [h] at hb; exact absurd hb (by decide)
+  refine acc_cast (show e ++ ((b :: mr) ++ ([SP] ++ (t ++ ([SP] ++
+      ((Chunked.ascii "HTTP/" ++ [major] ++ Chunked.ascii "." ++ [minor]) ++ ([CR] ++ ([LF] ++ []))))))) = _ by
+      simp [Chunked.CRLF, CR, LF, Chunked.CR, Chunked.LF, Chunked.SP, SP])
+    (acc_bind (acc_skipEmptyLines _ he _ 0 b _ hbcr (by omega) (by omega)) ?_)
+  refine acc_bind (acc_method _ hm hml hM) ?_
+  refine acc_bind (acc_pbyte _ _) ?_
+  refine acc_bind (acc_rawUri _ _ htv htl) ?_
+  refine acc_bind (acc_pbyte _ _) ?_
+  have hc : ¬ (t.isEmpty || !t.all isVChar) = true := by
+    simp only [Bool.or_eq_true, Bool.not_eq_true', not_or, Bool.not_eq_false, List.isEmpty_iff,
+      List.all_eq_true]
+    exact ⟨ht, htv⟩
+  refine acc_ite_neg hc ?_
+  have hT' : (Std.Http.URI.Parser.parseRequestTarget <* Std.Internal.Parsec.eof).run ⟨t.toArray⟩ = .ok T := hT
+  rw [hT']
+  refine acc_bind (acc_httpVersionNumber _ h1 h2) ?_
   refine acc_bind (acc_pbyte _ _) ?_
   refine acc_bind (acc_pbyte _ _) ?_
   exact acc_pure _ _
