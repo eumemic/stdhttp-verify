@@ -105,7 +105,30 @@ values, unknown transfer codings before `chunked`, `OPTIONS *`, leading blank li
 neither. All seven servers compared accept the name-only form, so this is not a framing
 ambiguity; `spec/Spec/Chunked.lean` states the accepted grammar with this leniency explicitly.
 
-## 7. Spec
+## 7. Found while proving: 400 or 414 for a long request-target, depending on read boundaries
 
-See `spec/README.md`: receive-loop model with the segmentation-independence theorem (kernel-checked),
-the RFC 9112 §7.1 chunked grammar, and evaluation-based checks tying both to the real parsers.
+A request whose target exceeds `maxUriLength` (default 8192) should get 414 (RFC 9112 §3: a
+server "MUST respond with a 414 (URI Too Long)"). `Std.Http` gives 414 only if the bytes up to
+the parser's `maxUriLength` check (method, SP, 8193 target bytes) have arrived when it parses;
+if a read ends between byte 8192 and the check, the start-line limit (`maxStartLineLength`,
+default 8192, checked by `parseWith` on incomplete lines too) fires first and the answer is 400.
+The server reads at most `maximumRecvSize` = 8192 bytes at a time, so over TCP the first read of
+such a request typically ends at byte 8192: in a local test, a `GET` with an 8194-byte target
+sent in one write got `400 Bad Request` from the shipped server. Found by a differential test of
+the machine (one read vs. every split, `spec/test/SplitDiff.lean`) while setting up the
+machine-level segmentation proof. Both answers reject the request, so this is not a framing
+problem; it is the second way in which the shipped server's answer depends on read boundaries.
+
+The patched copy (`fix/`) checks `maxStartLineLength` on the complete line only
+(`processReceivingStartLine`), as `Std.Http` already does for the header-size limit. An
+incomplete line is still bounded by the request-line parser's own limits (8 leading empty lines,
+a 64-byte method, `maxUriLength`): at most `maxUriLength` + 92 bytes. With that change the same
+request gets 414 for every split; on complete requests nothing changes (150 seeds, 4,987
+mutations, 24 FRO test files, segmentation tests).
+
+## 8. Spec
+
+See `spec/README.md`: what is proven about the patched copy (kernel-checked): the parsers' prefix
+consistency and soundness, RFC 9112 framing for the whole receiving machine (`no_desync`,
+`pulled_bodies`, `nothing_after_rejection`), and machine-level segmentation independence
+(`read_split`, `pull_split`), with the conditions each result needs.

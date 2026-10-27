@@ -4,7 +4,10 @@ Differential testing and formal verification of Lean's built-in HTTP/1.1 server,
 
 - **Bug:** a valid chunked request with a chunk extension or trailer gets 400 or 200 depending on
   how its bytes are split across TCP reads — [leanprover/lean4#15840](https://github.com/leanprover/lean4/issues/15840),
-  fix in [#15841](https://github.com/leanprover/lean4/pull/15841). Details in `FINDINGS.md`.
+  fix in [#15841](https://github.com/leanprover/lean4/pull/15841). A second, minor one, found while
+  proving: a request with an overlong request-target gets 414 or 400 depending on where a read ends
+  (RFC 9112 §3 requires 414); the server reads at most 8192 bytes at a time, and in a local test
+  such a request sent in one write got 400. Details in `FINDINGS.md`.
 - **Proofs** (`spec/`, checked by Lean's kernel): in a patched copy of `Std.Http` (`fix/`), the
   parsers the server runs on request syntax — request line, header lines, chunk-size lines,
   trailer sections — are rewritten as total, end-of-input-strict functions and proven to give the
@@ -20,8 +23,13 @@ Differential testing and formal verification of Lean's built-in HTTP/1.1 server,
   a byte stream in only one way, so a front end that divides the stream by the same grammar agrees
   with the server on every request it reads (`no_desync`), and the body data handed to the
   handler is each request's decoded body, in order (`pulled_bodies`). After a rejection the
-  reader accepts no more bytes (`nothing_after_rejection`). See `spec/README.md` for exactly what is proven and
-  what each result trusts.
+  reader accepts no more bytes (`nothing_after_rejection`). For the whole machine, splitting the
+  input into reads does not change what the reader does: before a response is sent, feeding `x`
+  then `y` with the read loop run after each ends like feeding `x ++ y` once (`read_split`), and a
+  body pull that hands out nothing, followed by more bytes and another pull, hands out the same as
+  one pull after all the bytes (`pull_split`); the bug is a counterexample to the latter in the
+  shipped server. See `spec/README.md` for exactly what is proven, under which conditions, and what
+  each result trusts.
 
 `fix/` is a modified copy of `Std.Http` from Lean `nightly-2026-10-20` (Copyright Lean FRO, LLC,
 Apache 2.0); changes: `Protocol/H1/ChunkLine.lean` and `Protocol/H1/RequestLine.lean` (new; the
@@ -32,7 +40,8 @@ seven targets),
 and `parseSingleHeader` call them (the previous versions are kept as `*Legacy`; `parseChunkSizedData`
 reads the `CRLF` after chunk data as two bytes instead of through a private helper), and
 `Protocol/H1.lean`, whose 18 `partial def`s (the read and write loops) are total definitions with
-termination proofs, and whose helpers are public so that proofs can refer to them; otherwise
+termination proofs, whose helpers are public so that proofs can refer to them, and which checks the
+start-line length limit on complete lines only (the fix for the 414/400 finding); otherwise
 unchanged. Licensed under
 Apache 2.0 (`LICENSE`).
 
