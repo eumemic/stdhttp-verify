@@ -33,9 +33,10 @@ Differential testing and formal verification of Lean's built-in HTTP/1.1 server,
   while the reader discards the rest of the body, the same holds except that the split run can be
   ahead by some bytes of the current chunk's data (`read_split_drain`, `pull_split_drain`); the
   read and pull loops then end in the same machine, or both wait with the difference unchanged.
-  Conversely, the machine reads every request within its configured limits (`request_read`): with
-  a whole request in its buffer, the read loop records the head and pulls hand out the decoded
-  body. Where `Std.Http` is stricter than the RFC (ASCII field values, recognized methods, its
+  Conversely, the machine reads every request within its configured limits: with a whole request
+  in its buffer, the read loop records the head and pulls hand out the decoded body
+  (`request_read`; `request_read_continue` with `Expect: 100-continue`), and the same holds however
+  the request is split into reads, with steps and pulls in between (`split_read`). Where `Std.Http` is stricter than the RFC (ASCII field values, recognized methods, its
   Host check, its Transfer-Encoding rules), the theorem states that as a condition.
   See `spec/README.md` for exactly what is proven, under which conditions, and what
   each result trusts.

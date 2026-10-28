@@ -584,7 +584,8 @@ theorem processHeaders_ok (m : Machine .receiving) {b : Body.Length}
     (Machine.processHeaders m).reader =
       { m.reader with state := afterHead m.reader.messageHead b } ∧
       (Machine.processHeaders m).config = m.config ∧
-      (Machine.processHeaders m).writer.sentMessage = m.writer.sentMessage := by
+      (Machine.processHeaders m).writer.sentMessage = m.writer.sentMessage ∧
+      (Machine.processHeaders m).writer = { m.writer with state := .waitingHeaders } := by
   unfold Machine.processHeaders
   simp only [Machine.updateKeepAlive]
   rw [show Machine.checkMessageHead (dir := .receiving) _ = _ from checkReceiving_of ht hh hs]
@@ -683,10 +684,12 @@ def Got (c : PulledChunk) (d : List UInt8) (final : Bool) : Prop :=
   c.final = final ∧ c.incomplete = false ∧ c.chunk.data.data.toList = d
 
 /-- What a body step leaves: the configuration and writer unchanged, the reader in state `st`
-with `rest` unread and `k` more body bytes counted. -/
+with `rest` unread and `k` more body bytes counted; the recorded head and the end-of-input flag
+unchanged. -/
 def After (m m' : Machine .receiving) (st : Reader.State .receiving) (rest : List UInt8) (k : Nat) : Prop :=
   m'.config = m.config ∧ m'.writer = m.writer ∧ m'.reader.state = st ∧ unread m'.reader.input = rest ∧
-    InBounds m' ∧ m'.reader.bodyBytesRead = m.reader.bodyBytesRead + k
+    InBounds m' ∧ m'.reader.bodyBytesRead = m.reader.bodyBytesRead + k ∧
+    m'.reader.messageHead = m.reader.messageHead ∧ m'.reader.noMoreInput = m.reader.noMoreInput
 
 theorem emit_ok (m : Machine .receiving) (ns : Reader.State .receiving) (final : Bool)
     (ext : Array (Chunk.ExtensionName × Option Chunk.ExtensionValue)) (s : ByteSlice) (cb : Bool)
@@ -708,8 +711,8 @@ theorem emit_ok (m : Machine .receiving) (ns : Reader.State .receiving) (final :
 theorem after_setInput {m m1 : Machine .receiving} {j : It} {st : Reader.State .receiving} {k : Nat}
     {rest : List UInt8} (hju : unread j = rest)
     (h : After { m with reader := m.reader.setInput j } m1 st (unread j) k) : After m m1 st rest k := by
-  obtain ⟨h1, h2, h3, h4, h5, h6⟩ := h
-  exact ⟨h1, h2, h3, hju ▸ h4, h5, h6⟩
+  obtain ⟨h1, h2, h3, h4, h5, h6, h7, h8⟩ := h
+  exact ⟨h1, h2, h3, hju ▸ h4, h5, h6, h7, h8⟩
 
 /-- A fixed-length body of `n ≥ 1` bytes, all unread: one step reads it and completes the body. -/
 theorem parseBody_fixed_all {m : Machine .receiving} {n : Nat} {d rest : List UInt8}
@@ -760,7 +763,8 @@ theorem parseBody_size {m : Machine .receiving} {line rest : List UInt8} {size :
       simp only [Machine.fitsBodyLimit, Reader.setInput]; exact decide_eq_true hfit
     rw [if_neg (by simpa using hmax), hf]
     rfl
-  · exact ⟨rfl, rfl, rfl, hju, hjb, by simp [Machine.setReaderState, Machine.modifyReader, Reader.setInput]⟩
+  · exact ⟨rfl, rfl, rfl, hju, hjb, by simp [Machine.setReaderState, Machine.modifyReader, Reader.setInput],
+      rfl, rfl⟩
 
 /-- A chunk's `size ≥ 1` data bytes and `CRLF`: one step reads them and returns to the next
 chunk-size line. -/
@@ -812,14 +816,14 @@ theorem after_pull {m m1 : Machine .receiving} {c : Option PulledChunk} {st : Re
     ∃ m', m.pullBody = (m', c) ∧ After m m' st rest k := by
   unfold Machine.pullBody
   rw [h]
-  obtain ⟨h1, h2, h3, h4, h5, h6⟩ := ha
-  exact ⟨_, rfl, h1, h2, h3, h4, h5, h6⟩
+  obtain ⟨h1, h2, h3, h4, h5, h6, h7, h8⟩ := ha
+  exact ⟨_, rfl, h1, h2, h3, h4, h5, h6, h7, h8⟩
 
 theorem after_trans {m m1 m2 : Machine .receiving} {s1 s2 : Reader.State .receiving} {r1 r2 : List UInt8}
     {k1 k2 : Nat} (h1 : After m m1 s1 r1 k1) (h2 : After m1 m2 s2 r2 k2) : After m m2 s2 r2 (k1 + k2) := by
-  obtain ⟨a1, a2, -, -, -, a6⟩ := h1
-  obtain ⟨b1, b2, b3, b4, b5, b6⟩ := h2
-  exact ⟨b1.trans a1, b2.trans a2, b3, b4, b5, by rw [b6, a6]; omega⟩
+  obtain ⟨a1, a2, -, -, -, a6, a7, a8⟩ := h1
+  obtain ⟨b1, b2, b3, b4, b5, b6, b7, b8⟩ := h2
+  exact ⟨b1.trans a1, b2.trans a2, b3, b4, b5, by rw [b6, a6]; omega, b7.trans a7, b8.trans a8⟩
 
 /-- A fixed-length body, all unread: one pull returns it, marked final, and completes the body. -/
 theorem pull_fixed {m : Machine .receiving} {n : Nat} {d rest : List UInt8}
@@ -858,12 +862,12 @@ theorem pull_chunk {m : Machine .receiving} {line d rest : List UInt8}
   subst hd
   obtain ⟨m1, ext, hpb1, ha1⟩ := parseBody_size (rest := d ++ CRLF ++ rest) hib (by rw [hu]; simp) hl hll
     hmax (by omega)
-  obtain ⟨c1, c2, c3, c4, c5, c6⟩ := ha1
+  obtain ⟨c1, c2, c3, c4, c5, c6, c7, c8⟩ := ha1
   obtain ⟨m2, c, hpb2, hg, ha2⟩ := parseBody_data (m := m1) (ext := ext) c5 c4 rfl hn
     (by rw [c6, c1]; omega) (by rw [c2]; exact hs)
   have hpull : m.pullNextChunk = (m2, some c) := by
     rw [pull_cont hst hpb1, pull_some c3 hpb2]
-  obtain ⟨m', hp, ha'⟩ := after_pull hpull (by simpa using after_trans ⟨c1, c2, c3, c4, c5, c6⟩ ha2)
+  obtain ⟨m', hp, ha'⟩ := after_pull hpull (by simpa using after_trans ⟨c1, c2, c3, c4, c5, c6, c7, c8⟩ ha2)
   exact ⟨m', c, hp, hg, ha'⟩
 
 /-- The last chunk and trailer section within the limits: one pull returns an empty chunk marked
@@ -876,12 +880,12 @@ theorem pull_last {m : Machine .receiving} {line rest : List UInt8} {items : Lis
   obtain ⟨hl, hll, hall, hn⟩ := h
   obtain ⟨m1, ext, hpb1, ha1⟩ := parseBody_size (rest := items.flatten ++ CRLF ++ rest) hib
     (by rw [hu]; simp) hl hll (by omega) (by omega)
-  obtain ⟨c1, c2, c3, c4, c5, c6⟩ := ha1
+  obtain ⟨c1, c2, c3, c4, c5, c6, c7, c8⟩ := ha1
   obtain ⟨m2, c, hpb2, hg, ha2⟩ := parseBody_last (m := m1) (ext := ext) c5 c4 (by rw [c1]; exact hall)
     (by rw [c1]; exact hn) (by rw [c6, c1]; omega) (by rw [c2]; exact hs)
   have hpull : m.pullNextChunk = (m2, some c) := by
     rw [pull_cont hst hpb1, pull_some c3 hpb2]
-  obtain ⟨m', hp, ha'⟩ := after_pull hpull (after_trans ⟨c1, c2, c3, c4, c5, c6⟩ ha2)
+  obtain ⟨m', hp, ha'⟩ := after_pull hpull (after_trans ⟨c1, c2, c3, c4, c5, c6, c7, c8⟩ ha2)
   exact ⟨m', c, hp, hg, ha'⟩
 
 /-- `k` pulls in a row, and what each returned. -/
@@ -915,13 +919,13 @@ theorem pull_chunks : ∀ (cs : List (List UInt8 × List UInt8)) (m : Machine .r
   | (cl, d) :: cs, m, line, items, rest, hst, hib, hu, hall, hl, hfit, hs => by
     obtain ⟨m1, c, hp, hg, ha⟩ := pull_chunk (line := cl) (d := d) (rest := chunkBytes cs ++ line ++ items.flatten ++ CRLF ++ rest)
       hst hib (by rw [hu]; simp [chunkBytes]) (hall _ (by simp)) (by simp at hfit; omega) hs
-    obtain ⟨a1, a2, a3, a4, a5, a6⟩ := ha
+    obtain ⟨a1, a2, a3, a4, a5, a6, a7, a8⟩ := ha
     obtain ⟨m', ps, fin, hp', hps, hfin, ha'⟩ := pull_chunks cs m1 line items rest a3 a5 a4
       (by rw [a1]; exact fun c hc => hall c (by simp [hc])) (by rw [a1]; exact hl)
       (by rw [a6, a1]; simp only [List.map_cons, List.flatten_cons, List.length_append] at hfit; omega) (by rw [a2]; exact hs)
     refine ⟨m', some c :: ps, fin, ?_, Pairwise2.cons ⟨c, rfl, hg⟩ hps, hfin, ?_⟩
     · simp only [List.length_cons, pullN, hp, hp', List.cons_append]
-    · have := after_trans ⟨a1, a2, a3, a4, a5, a6⟩ ha'
+    · have := after_trans ⟨a1, a2, a3, a4, a5, a6, a7, a8⟩ ha'
       simpa [Nat.add_comm] using this
 
 /-! ## Whole requests -/
@@ -1083,7 +1087,7 @@ theorem request_head {m : Machine .receiving} {rl mb tb w d rest : List UInt8} {
           getAll_none hf Header.Name.host hhs] at hc
         exact absurd hc (by decide))
     exact host_ok hhd hf hhs hx
-  obtain ⟨hr, hcfg, hsent⟩ := processHeaders_ok M0 (target_ok htarget) hck hgs hmax
+  obtain ⟨hr, hcfg, hsent, -⟩ := processHeaders_ok M0 (target_ok htarget) hck hgs hmax
   have hst1 : (Machine.processHeaders M0).reader.state = afterHead mh b := by rw [hr]; rfl
   have hpr : m.processRead = Machine.processHeaders M0 := by
     rw [he]
