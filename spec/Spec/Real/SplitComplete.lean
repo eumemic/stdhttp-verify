@@ -766,15 +766,16 @@ theorem checked {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} (hR : ReqOk cfg 
 
 /-! ## The head, read in pieces -/
 
-/-- What holds throughout the head. -/
-def Base (cfg : Protocol.H1.Config) (m : Machine .receiving) (y : List UInt8) : Prop :=
-  m.config = cfg ∧ InBounds m ∧ m.writer.sentMessage = false ∧ m.writer.userClosedBody = false ∧
+/-- What holds throughout the head (with the writer's closed-body flag `u`, which the reader never
+reads). -/
+def Base (cfg : Protocol.H1.Config) (m : Machine .receiving) (y : List UInt8) (u : Bool := false) : Prop :=
+  m.config = cfg ∧ InBounds m ∧ m.writer.sentMessage = false ∧ m.writer.userClosedBody = u ∧
     m.writer.state = .pending ∧ (y ≠ [] → m.reader.noMoreInput = false) ∧ m.reader.bodyBytesRead = 0
 
 /-- The machine is reading the head of `R`, followed by `rest`; `y` are the bytes still to arrive. -/
 def HdrAt (cfg : Protocol.H1.Config) (h0 : Nat) (R : Req) (rest : List UInt8) (m : Machine .receiving)
-    (y : List UInt8) : Prop :=
-  Base cfg m y ∧
+    (y : List UInt8) (u : Bool := false) : Prop :=
+  Base cfg m y u ∧
   ((m.reader.state = .needStartLine ∧ unread m.reader.input ++ y = R.bytes ++ rest ∧
       m.reader.headerBytesRead = h0) ∨
    ∃ k fields, m.reader.state = .needHeader k ∧ k ≤ R.lines.length ∧
@@ -785,8 +786,8 @@ def HdrAt (cfg : Protocol.H1.Config) (h0 : Nat) (R : Req) (rest : List UInt8) (m
 /-- The machine has read the head of `R` and is at the start of its body (or waiting to start it,
 for `Expect: 100-continue`). -/
 def BodyStart (cfg : Protocol.H1.Config) (R : Req) (rest : List UInt8) (m : Machine .receiving)
-    (y : List UInt8) : Prop :=
-  (InBody m R.w R.d y rest ∨ InWait m R.w R.d y rest) ∧ m.config = cfg ∧ m.writer.userClosedBody = false ∧
+    (y : List UInt8) (u : Bool := false) : Prop :=
+  (InBody m R.w R.d y rest ∨ InWait m R.w R.d y rest) ∧ m.config = cfg ∧ m.writer.userClosedBody = u ∧
     m.writer.state = .waitingHeaders ∧
     ∃ fields, Pairwise2 RecordedLine fields R.lines ∧ m.reader.messageHead = R.head fields
 
@@ -824,17 +825,19 @@ theorem hdr_wait {m : Machine .receiving} {k : Nat} (hst : m.reader.state = .nee
   rfl
 
 theorem hdrAt_addEvent {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} {rest : List UInt8} {m : Machine .receiving}
-    {y : List UInt8} (e : Event .receiving) (h : HdrAt cfg h0 R rest m y) : HdrAt cfg h0 R rest (m.addEvent e) y := h
+    {y : List UInt8} {u : Bool} (e : Event .receiving) (h : HdrAt cfg h0 R rest m y u) :
+    HdrAt cfg h0 R rest (m.addEvent e) y u := h
 
 /-- The header loop, on any part of the rest of the head: it reads the complete lines and waits,
 or reads the whole head and enters the body. -/
-theorem read_hdrs {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} (hR : ReqOk cfg h0 R) {rest y : List UInt8} :
+theorem read_hdrs {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} (hR : ReqOk cfg h0 R) {rest y : List UInt8}
+    {u : Bool} :
     ∀ (n k : Nat) (fields : List (Header.Name × Header.Value)) (m : Machine .receiving),
-      n + k = R.lines.length → Base cfg m y → m.reader.state = .needHeader k →
+      n + k = R.lines.length → Base cfg m y u → m.reader.state = .needHeader k →
       unread m.reader.input ++ y = ((R.lines.drop k).map (·.1 ++ CRLF)).flatten ++ CRLF ++ R.w ++ rest →
       m.reader.messageHead = R.head fields → Pairwise2 RecordedLine fields (R.lines.take k) →
       m.reader.headerBytesRead = h0 + ((R.lines.take k).map (·.1 ++ CRLF)).flatten.length →
-      (HdrAt cfg h0 R rest m.processRead y ∧ y ≠ []) ∨ BodyStart cfg R rest m.processRead y
+      (HdrAt cfg h0 R rest m.processRead y u ∧ y ≠ []) ∨ BodyStart cfg R rest m.processRead y u
   | 0, k, fields, m, hnk, hB, hst, hu, hmh, hf, hhb => by
     obtain ⟨hcfg, hib, hs, huc, hws, hnm, hbb⟩ := hB
     have hk : k = R.lines.length := by omega
@@ -845,7 +848,7 @@ theorem read_hdrs {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} (hR : ReqOk cf
     simp only [List.map_nil, List.flatten_nil, List.nil_append] at hu
     subst hcfg
     have hcover : ∀ c', unread m.reader.input = CRLF ++ c' → c' ++ y = R.w ++ rest →
-        BodyStart m.config R rest m.processRead y := by
+        BodyStart m.config R rest m.processRead y u := by
       intro c' hc hcy
       obtain ⟨j, he, hju, hjb⟩ := headers_end hst hib hc
       obtain ⟨h1, h2, h3, h4, h5, -⟩ := checked hR (withHead m j (.needHeader k) m.reader.messageHead
@@ -891,7 +894,7 @@ theorem read_hdrs {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} (hR : ReqOk cf
     simp only [List.map_cons, List.flatten_cons, List.append_assoc] at hu
     have hcover : ∀ c', unread m.reader.input = x ++ CRLF ++ c' →
         c' ++ y = (L'.map (·.1 ++ CRLF)).flatten ++ CRLF ++ R.w ++ rest →
-        (HdrAt m.config h0 R rest m.processRead y ∧ y ≠ []) ∨ BodyStart m.config R rest m.processRead y := by
+        (HdrAt m.config h0 R rest m.processRead y u ∧ y ≠ []) ∨ BodyStart m.config R rest m.processRead y u := by
       intro c' hc hcy
       obtain ⟨j, N, V, v, he, hju, hjb, hN, hV, hfo⟩ := header_step hst hib hc hline
         (by have := hR.hn; omega) (by have := hR.hb; rw [hhb]; omega)
@@ -922,8 +925,8 @@ theorem read_hdrs {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} (hR : ReqOk cf
 /-- **The read loop on any part of the request's head**: it reads the complete lines and waits,
 or reads the whole head and enters the body. -/
 theorem read_head {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} (hR : ReqOk cfg h0 R) {rest y : List UInt8}
-    {m : Machine .receiving} (h : HdrAt cfg h0 R rest m y) :
-    (HdrAt cfg h0 R rest m.processRead y ∧ y ≠ []) ∨ BodyStart cfg R rest m.processRead y := by
+    {u : Bool} {m : Machine .receiving} (h : HdrAt cfg h0 R rest m y u) :
+    (HdrAt cfg h0 R rest m.processRead y u ∧ y ≠ []) ∨ BodyStart cfg R rest m.processRead y u := by
   obtain ⟨hB, ⟨hst, hu, hhb⟩ | ⟨k, fields, hst, hk, hu, hmh, hf, hhb⟩⟩ := h
   · obtain ⟨hcfg, hib, hs, huc, hws, hnm, hbb⟩ := hB
     subst hcfg
@@ -945,7 +948,7 @@ theorem read_head {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} (hR : ReqOk cf
       have h1 := HttpSpec.Strict.requestLine_complete (rlim m.config) hR.line hR.meth hR.target r
       rw [← hR.ver]; exact h1
     have hcover : ∀ c', unread m.reader.input = R.rl ++ c' → c' ++ y = R.hdr ++ CRLF ++ R.w ++ rest →
-        (HdrAt m.config h0 R rest m.processRead y ∧ y ≠ []) ∨ BodyStart m.config R rest m.processRead y := by
+        (HdrAt m.config h0 R rest m.processRead y u ∧ y ≠ []) ∨ BodyStart m.config R rest m.processRead y u := by
       intro c' hc hcy
       obtain ⟨j, he, hju, hjb⟩ := startLine_step hst hib hc hR.line hR.len hR.meth hR.target hR.ver hR.ver1
       rw [he]
@@ -1027,14 +1030,14 @@ theorem processWrite_waiting {m : Machine .receiving} (hw : m.writer.state = .wa
   rw [(processWrite_cases m).2.2.2.2.2.2.2 hw, hu]; simp
 
 theorem hdr_state {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} {rest : List UInt8} {m : Machine .receiving}
-    {y : List UInt8} (h : HdrAt cfg h0 R rest m y) :
+    {y : List UInt8} {u : Bool} (h : HdrAt cfg h0 R rest m y u) :
     m.reader.state = .needStartLine ∨ ∃ k, m.reader.state = .needHeader k := by
   obtain ⟨-, ⟨hst, -⟩ | ⟨k, -, hst, -⟩⟩ := h
   · exact Or.inl hst
   · exact Or.inr ⟨k, hst⟩
 
 theorem isClosed_hdr {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} {rest : List UInt8} {m : Machine .receiving}
-    {y : List UInt8} (h : HdrAt cfg h0 R rest m y) : m.reader.isClosed = false := by
+    {y : List UInt8} {u : Bool} (h : HdrAt cfg h0 R rest m y u) : m.reader.isClosed = false := by
   rcases hdr_state h with hst | ⟨k, hst⟩ <;> simp [Reader.isClosed, hst]
 
 /-- **A step**: the machine stays in its phase or moves on; with no bytes still to arrive, a step
@@ -1443,7 +1446,7 @@ theorem drop_hdr_len (R : Req) (k : Nat) :
   rw [this, List.length_append]; omega
 
 theorem hdr_len {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} {rest y : List UInt8} {m : Machine .receiving}
-    (h : HdrAt cfg h0 R rest m y) : (unread m.reader.input ++ y).length ≤ (R.bytes ++ rest).length := by
+    {u : Bool} (h : HdrAt cfg h0 R rest m y u) : (unread m.reader.input ++ y).length ≤ (R.bytes ++ rest).length := by
   obtain ⟨-, ⟨-, hu, -⟩ | ⟨k, -, -, -, hu, -⟩⟩ := h
   · rw [hu]; exact Nat.le_refl _
   · rw [hu]; have := drop_hdr_len R k
