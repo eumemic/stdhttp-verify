@@ -9,9 +9,11 @@ Differential testing and formal verification of Lean's built-in HTTP/1.1 server,
   (RFC 9112 §3 requires 414); the server reads at most 8192 bytes at a time, and in a local test
   such a request sent in one write got 400 —
   [leanprover/lean4#16035](https://github.com/leanprover/lean4/issues/16035). Two more, found while
-  proving the URI parser complete (not yet reported): a query parameter with more than one `=`
-  (`?token=YWJj==`) and a host name that begins with an IPv4 address (`1.2.3.4-x.example`) get 400
-  (FINDINGS §9). Details in `FINDINGS.md`.
+  proving the URI parser complete: a query parameter with more than one `=` (`?token=YWJj==`) and a
+  host name that begins with an IPv4 address (`1.2.3.4-x.example`) get 400 — the first already
+  reported by another user as [leanprover/lean4#16021](https://github.com/leanprover/lean4/issues/16021),
+  the second reported as [leanprover/lean4#16058](https://github.com/leanprover/lean4/issues/16058);
+  both are fixed in the patched copy (FINDINGS §9). Details in `FINDINGS.md`.
 - **Proofs** (`spec/`, checked by Lean's kernel): in a patched copy of `Std.Http` (`fix/`), the
   parsers the server runs on request syntax — request line, header lines, chunk-size lines,
   trailer sections — are rewritten as total, end-of-input-strict functions and proven to give the
@@ -46,9 +48,8 @@ Differential testing and formal verification of Lean's built-in HTTP/1.1 server,
   and Host parsers accept every request-target in the four forms of RFC 9112 §3.2 (absolute-form
   with the `http` and `https` schemes) and every Host value, within their limits (`targetHost_ok`). Where `Std.Http` is stricter than the RFC (ASCII
   field values, recognized methods, its URI and Host restrictions, its Transfer-Encoding rules),
-  the theorems state that as a condition; two of the URI restrictions are the bugs of FINDINGS §9.
-  `Std.Http` parses IP literals with libuv, which the kernel cannot evaluate, so those cases take
-  libuv's answer as a hypothesis.
+  the theorems state that as a condition. `Std.Http` parses IPv6 literals with libuv, which the
+  kernel cannot evaluate, so that case takes libuv's answer as a hypothesis.
   See `spec/README.md` for exactly what is proven, under which conditions, and what
   each result trusts.
 
@@ -66,8 +67,11 @@ start-line length limit on complete lines only (the fix for the 414/400 finding)
 `Data/URI/Parser.lean`, whose scanning helpers (`partial` upstream), path loop (a `while` loop
 upstream) and `parseRequestTarget`'s `where` clauses are total, top-level definitions, with its
 helpers public (the shipped version is kept as `ParserLegacy.lean`; `spec/Spec/Real/URIEquiv.lean`
-checks that both give the same results), and `Data/URI/Encoding.lean`, whose percent-encoding
-check's inner loop is a top-level definition; otherwise unchanged. Licensed under
+checks that both give the same results apart from the next two changes), which also keeps an `=`
+after the first in a query parameter, percent-encoded, in the value, and reads a host that begins
+with an IPv4 address and goes on (`1.2.3.4-x.example`) as a name (FINDINGS §9; the copy of the FRO
+test `async_http_uri.lean` changes one expectation accordingly), and `Data/URI/Encoding.lean`, whose
+percent-encoding check's inner loop is a top-level definition; otherwise unchanged. Licensed under
 Apache 2.0 (`LICENSE`).
 
 - `servers/lean_stdhttp/` — HTTP Garden echo origin built on `Std.Http` (toolchain pinned in `lean-toolchain`).

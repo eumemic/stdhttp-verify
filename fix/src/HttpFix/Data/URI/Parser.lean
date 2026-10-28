@@ -170,7 +170,13 @@ def parseHost (config : URI.Config) : Parser URI.Host := do
     return .ipv6 (← parseIPv6)
   else
     if (← peekWhen? isDigitByte).isSome then
-      if let some ipv4 ← tryOpt parseIPv4 then
+      -- An IPv4 literal is the whole host (RFC 3986 §3.2.2): when a name byte follows the address,
+      -- as in `1.2.3.4-x.example`, the host is a name.
+      if let some ipv4 ← tryOpt do
+          let ipv4 ← parseIPv4
+          if (← peekWhen? (fun x => isAlphaNum x ∨ x = '-'.toUInt8 ∨ x = '.'.toUInt8)).isSome then
+            fail "not an IPv4 address"
+          return ipv4 then
         return .ipv4 ipv4
 
     -- It needs to be a legal DNS label, so it differs from reg-name.
@@ -318,7 +324,9 @@ def parseQuery (config : URI.Config) : Parser URI.Query := do
       pure (acc.insertEncoded key none)
     | key :: value =>
       let key ← URI.EncodedQueryParam.fromString? key
-      let value ← URI.EncodedQueryParam.fromString? (String.intercalate "=" value)
+      -- An `=` after the first is part of the value (RFC 3986 allows `=` in a query), but
+      -- `EncodedQueryParam` excludes `=`, so it is kept percent-encoded.
+      let value ← URI.EncodedQueryParam.fromString? (String.intercalate "%3D" value)
       pure (acc.insertEncoded key (some value))
     | [] => pure acc  -- unreachable: splitOn always returns at least one element
 

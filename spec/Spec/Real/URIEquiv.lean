@@ -8,10 +8,16 @@ The patched copy replaces the URI parser's `partial` pieces (`takeWhileAtMost`,
 `takeWhile1AtMost`, and `parsePath`'s `while` loop) with total definitions, and makes
 `parseRequestTarget`'s `where` clauses top-level definitions, so that they can be reasoned about.
 (Both parsers share the percent-encoding check; `URIComplete.isValidPercentEncoding_shipped` proves
-the patched one equal to the shipped one.) This file compares the patched parser with the shipped one
-(`HttpFix.Data.URI.ParserLegacy`): the request-target parser and the Host-header parser, on every
-string up to a bounded length over small alphabets and on cases at and around each limit. Checked
-with `native_decide`, so this relies on the compiler.
+the patched one equal to the shipped one.) It also fixes the two rejections of FINDINGS §9: an `=`
+after the first in a query parameter is kept, percent-encoded, as part of the value; and the IPv4
+attempt on a host fails when a name byte follows the address (`1.2.3.4-x.example`).
+
+This file compares the patched parser with the shipped one (`HttpFix.Data.URI.ParserLegacy`): the
+request-target parser and the Host-header parser, on every string up to a bounded length over small
+alphabets, where they give the same result, and on cases at and around each limit, with all their
+prefixes, where they give the same result except on the inputs of those two fixes: there the shipped
+parser rejects and the patched one accepts (or, for two incomplete hosts, also rejects). Checked with
+`native_decide`, so this relies on the compiler.
 -/
 
 open Std.Http
@@ -49,10 +55,15 @@ def strings (alphabet : List UInt8) : Nat → List (List UInt8)
 def checkAll (f g : List UInt8 → String) (alphabet : List UInt8) (n : Nat) : Bool :=
   (List.range (n + 1)).all fun len => (strings alphabet len).all fun s => f s == g s
 
-def checkPrefixes (f g : List UInt8 → String) (inputs : List String) : Bool :=
-  inputs.all fun s =>
-    let b := bytes s
-    (List.range (b.length + 1)).all fun k => f (b.take k) == g (b.take k)
+def prefixesOf (s : String) : List (List UInt8) :=
+  (List.range ((bytes s).length + 1)).map (fun n => (bytes s).take n)
+
+/-- The prefixes of `inputs` on which `f` and `g` differ. -/
+def diffInputs (f g : List UInt8 → String) (inputs : List String) : List String :=
+  (inputs.flatMap prefixesOf).filterMap
+    (fun l => if f l == g l then none else some (String.fromUTF8! ⟨l.toArray⟩))
+
+def isOk (r : String) : Bool := r.startsWith "ok"
 
 /-- Request targets: every string of length ≤ 6 over `/?a%1:@*.` and `#` (about 1.1 million). -/
 theorem target_upTo6 : checkAll target targetLegacy (bytes "/?a%1:@*.#") 6 = true := by
@@ -78,7 +89,19 @@ def limitTargets : List String :=
     "http://" ++ rep 254 "a" ++ "/", "*", "**", "/#a", "//a", "///", "/a//b/", "mailto:x@y", "a:b",
     "/a?token=YWJj==", "/login?next=/home?tab=1", "http://1.2.3.4-x.example/", "1.2.3.4-x.example:443" ]
 
-theorem target_limits : checkPrefixes target targetLegacy limitTargets = true := by
+/-- Where the two target parsers differ: an `=` after the first in a query parameter, and a host
+that begins with `1.2.3.4-x`. -/
+def targetDiffs : List String :=
+  [ "/?a=b=", "/?a=b=c", "/a?token=YWJj=", "/a?token=YWJj==", "/login?next=/home?tab=",
+    "/login?next=/home?tab=1", "http://1.2.3.4-x", "http://1.2.3.4-x.e", "http://1.2.3.4-x.ex",
+    "http://1.2.3.4-x.exa", "http://1.2.3.4-x.exam", "http://1.2.3.4-x.examp", "http://1.2.3.4-x.exampl",
+    "http://1.2.3.4-x.example", "http://1.2.3.4-x.example/", "1.2.3.4-x.example:4", "1.2.3.4-x.example:44",
+    "1.2.3.4-x.example:443" ]
+
+/-- On the limit targets and all their prefixes, the parsers agree except on `targetDiffs`, where the
+shipped parser rejects and the patched one accepts. -/
+theorem target_limits : diffInputs target targetLegacy limitTargets = targetDiffs ∧
+    targetDiffs.all (fun s => isOk (target (bytes s)) && !isOk (targetLegacy (bytes s))) = true := by
   native_decide
 
 def limitHosts : List String :=
@@ -86,7 +109,17 @@ def limitHosts : List String :=
     "127.0.0.1", "127.0.0.1:80", "1.2.3", "1a.com", "a_b", "-a", "a..b", "A.COM", "1.2.3.4-x.example",
     "1.2.3.4.nip.io" ]
 
-theorem host_limits : checkPrefixes host hostLegacy limitHosts = true := by
+/-- Where the two Host parsers differ: the prefixes of `1.2.3.4-x.example` from `1.2.3.4-` on. -/
+def hostDiffs : List String :=
+  [ "1.2.3.4-", "1.2.3.4-x", "1.2.3.4-x.", "1.2.3.4-x.e", "1.2.3.4-x.ex", "1.2.3.4-x.exa", "1.2.3.4-x.exam",
+    "1.2.3.4-x.examp", "1.2.3.4-x.exampl", "1.2.3.4-x.example" ]
+
+/-- On the limit hosts and all their prefixes, the parsers agree except on `hostDiffs`, where the
+shipped parser rejects and the patched one accepts, except `1.2.3.4-` and `1.2.3.4-x.`, which it
+also rejects (they end in `-` and `.`), with a different message. -/
+theorem host_limits : diffInputs host hostLegacy limitHosts = hostDiffs ∧
+    hostDiffs.all (fun s => !isOk (hostLegacy (bytes s)) &&
+      (isOk (host (bytes s)) || [ "1.2.3.4-", "1.2.3.4-x." ].contains s)) = true := by
   native_decide
 
 end HttpSpec.URIEquiv

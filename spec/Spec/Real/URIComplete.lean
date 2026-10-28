@@ -24,27 +24,31 @@ these into the `target`, `suits` and `host` conditions of `ReqOk`.
 The parsers are those of the patched copy (`fix/`). The shipped `takeAtMost` and `take1AtMost` scan
 with a `partial` function, `parsePath` loops with `while`, and `parseRequestTarget`'s alternatives
 are `where` clauses, so the copy restates these as total, top-level definitions; `URIEquiv` checks the
-copy against the shipped parser (`ParserLegacy`).
+copy against the shipped parser (`ParserLegacy`). The copy also fixes two rejections of valid input
+(FINDINGS §9): the shipped parser rejects a query parameter with more than one `=` (`?token=YWJj==`;
+the copy keeps the extra `=`, percent-encoded, in the value), and a host name that begins with an
+IPv4 address (`1.2.3.4-x.example`; in the copy the IPv4 attempt fails when a name byte follows the
+address). The theorems are about the fixed parser.
 
 The conditions encode these limits of `Std.Http` and these deviations from RFC 3986 and RFC 9112:
 
 * a path segment has at most `maxSegmentLength` (256) bytes, a path at most `maxPathSegments` (128)
   segments and `maxTotalPathLength` (8192) bytes;
 * a query has at most `maxQueryLength` (8192) bytes and `maxQueryParams` (100) `&`-separated
-  parameters, and **at most one `=` in each parameter**: `Std.Http` rejects `?a=b=c` and
-  `?token=YWJj==`, which RFC 3986 allows;
+  parameters;
 * a host is a DNS name (labels of letters, digits and `-`, at most 63 bytes each, beginning and ending
-  with a letter or digit, joined by `.`, at most 253 bytes), an IPv4 literal, or a bracketed IPv6
-  literal; RFC 3986 `reg-name` also allows sub-delims and percent-encoding;
+  with a letter or digit, joined by `.`, at most 253 bytes; this includes the dotted-decimal form of
+  IPv4 addresses) or a bracketed IPv6 literal; RFC 3986 `reg-name` also allows sub-delims and
+  percent-encoding;
 * a port has 1 to 5 digits and a value of at most 65535;
 * an absolute-form target has no userinfo (RFC 9110 §4.2.4 forbids it in `http` URIs); schemes other
   than `http` and `https` are not covered.
 
 `Std.Http` reads IP literals with libuv (`Std.Net.IPv4Addr.ofString` and `IPv6Addr.ofString` are
-`@[extern]` and opaque to the kernel), so the IP cases of `HostOk` carry libuv's answer as a
-hypothesis. So does a domain name that begins with a digit, because `Std.Http` first tries its
-leading digits and dots as an IPv4 address; **when libuv accepts them, `Std.Http` rejects the name**
-(`1.2.3.4-x.example`, a valid DNS name, gets 400).
+`@[extern]` and opaque to the kernel). For a name that begins with a digit the parser first tries its
+leading digits and dots as an IPv4 address: it accepts the name whatever libuv answers, and returns
+an IPv4 address exactly when libuv accepts the whole host (`HostIs`). The IPv6 case takes libuv's
+acceptance as a hypothesis.
 
 All results are kernel-checked and depend on the standard axioms only.
 -/
@@ -710,8 +714,11 @@ def QByte (b : UInt8) : Prop := (isQueryChar b = true ∧ b ≠ AMP ∧ b ≠ EQ
 /-- A query key or value: `QByte`s, every `%` followed by two hex digits. -/
 def QPart (w : List UInt8) : Prop := (∀ b ∈ w, QByte b) ∧ PctOk w
 
-/-- A query parameter: a key, or a key, `=` and a value. -/
-def QParam (p : List UInt8) : Prop := QPart p ∨ ∃ k v, p = k ++ EQ :: v ∧ QPart k ∧ QPart v
+/-- A query parameter: a key, or a key, `=` and a value. The value may contain `=` (RFC 3986 allows `=`
+anywhere in a query; the patched `parseQuery` keeps the extra `=` percent-encoded), so it is
+`=`-separated parts. -/
+def QParam (p : List UInt8) : Prop :=
+  QPart p ∨ ∃ k vs, p = k ++ EQ :: [EQ].intercalate vs ∧ QPart k ∧ vs ≠ [] ∧ ∀ v ∈ vs, QPart v
 
 /-- A query (after the `?`) as `parseQuery` reads it: parameters joined by `&`, at most
 `maxQueryParams` of them, within `maxQueryLength` bytes. -/
@@ -727,17 +734,6 @@ theorem qbyte_facts {b : UInt8} (h : QByte b) :
   · exact ⟨query_lt b hq, ha, he, by simp [hq]⟩
   · decide
 
-theorem qparam_bytes {p : List UInt8} (h : QParam p) :
-    ∀ b ∈ p, b < 0x80 ∧ b ≠ AMP ∧ decide (isQueryChar b = true ∨ b = '%'.toUInt8) = true := by
-  rcases h with ⟨hp, -⟩ | ⟨k, v, rfl, ⟨hk, -⟩, ⟨hv, -⟩⟩
-  · intro b hb; have := qbyte_facts (hp b hb); exact ⟨this.1, this.2.1, this.2.2.2⟩
-  · intro b hb
-    simp only [List.mem_append, List.mem_cons] at hb
-    rcases hb with hb | rfl | hb
-    · have := qbyte_facts (hk b hb); exact ⟨this.1, this.2.1, this.2.2.2⟩
-    · decide
-    · have := qbyte_facts (hv b hb); exact ⟨this.1, this.2.1, this.2.2.2⟩
-
 theorem all_intercalate {P : UInt8 → Prop} {s : List UInt8} (hs : ∀ b ∈ s, P b) :
     ∀ (L : List (List UInt8)), (∀ l ∈ L, ∀ b ∈ l, P b) → ∀ b ∈ s.intercalate L, P b
   | [], _ => by simp
@@ -750,6 +746,54 @@ theorem all_intercalate {P : UInt8 → Prop} {s : List UInt8} (hs : ∀ b ∈ s,
     · exact h x (by simp) b hb
     · exact hs b hb
     · exact all_intercalate hs (y :: L) (fun l hl => h l (List.mem_cons_of_mem _ hl)) b hb
+
+theorem qparam_bytes {p : List UInt8} (h : QParam p) :
+    ∀ b ∈ p, b < 0x80 ∧ b ≠ AMP ∧ decide (isQueryChar b = true ∨ b = '%'.toUInt8) = true := by
+  rcases h with ⟨hp, -⟩ | ⟨k, vs, rfl, ⟨hk, -⟩, -, hvs⟩
+  · intro b hb; have := qbyte_facts (hp b hb); exact ⟨this.1, this.2.1, this.2.2.2⟩
+  · intro b hb
+    simp only [List.mem_append, List.mem_cons] at hb
+    rcases hb with hb | rfl | hb
+    · have := qbyte_facts (hk b hb); exact ⟨this.1, this.2.1, this.2.2.2⟩
+    · decide
+    · refine all_intercalate (P := fun b => b < 0x80 ∧ b ≠ AMP ∧
+        decide (isQueryChar b = true ∨ b = '%'.toUInt8) = true) ?_ vs ?_ b hb
+      · intro c hc; simp at hc; subst hc; decide
+      · intro v hv c hc
+        have := qbyte_facts ((hvs v hv).1 c hc); exact ⟨this.1, this.2.1, this.2.2.2⟩
+
+/-- `%3D`, the percent-encoding of `=`. -/
+def P3D : List UInt8 := ['%'.toUInt8, '3'.toUInt8, 'D'.toUInt8]
+
+theorem pctOk_append : ∀ {a b : List UInt8}, PctOk a → PctOk b → PctOk (a ++ b)
+  | _, _, .nil, hb => hb
+  | _, _, .cons h ha, hb => .cons h (pctOk_append ha hb)
+  | _, _, .pct h1 h2 ha, hb => .pct h1 h2 (pctOk_append ha hb)
+
+theorem pctOk_intercalate : ∀ (vs : List (List UInt8)), (∀ v ∈ vs, PctOk v) → PctOk (P3D.intercalate vs)
+  | [], _ => .nil
+  | [v], h => by simpa using h v (by simp)
+  | v :: w :: vs, h => by
+    rw [List.intercalate_cons_cons]
+    exact pctOk_append (pctOk_append (h v (by simp)) (.pct (by decide) (by decide) .nil))
+      (pctOk_intercalate (w :: vs) (fun x hx => h x (List.mem_cons_of_mem _ hx)))
+
+/-- Parts joined by `%3D` are a query key or value. -/
+theorem qpart_intercalate {vs : List (List UInt8)} (h : ∀ v ∈ vs, QPart v) : QPart (P3D.intercalate vs) := by
+  refine ⟨all_intercalate (fun b hb => ?_) vs (fun v hv b hb => (h v hv).1 b hb), pctOk_intercalate vs (fun v hv => (h v hv).2)⟩
+  simp only [P3D, List.mem_cons, List.mem_nil_iff, or_false] at hb
+  rcases hb with rfl | rfl | rfl
+  · exact Or.inr rfl
+  · exact Or.inl ⟨by decide, by decide, by decide⟩
+  · exact Or.inl ⟨by decide, by decide, by decide⟩
+
+theorem intercalate_p3d (vs : List (List UInt8)) :
+    String.intercalate "%3D" (vs.map (fun v => String.ofList (v.map ofByte))) =
+      String.ofList ((P3D.intercalate vs).map ofByte) := by
+  apply String.toList_inj.mp
+  rw [String.toList_intercalate, String.toList_ofList, map_intercalate']
+  simp only [List.map_map, Function.comp_def, String.toList_ofList]
+  rfl
 
 theorem toUTF8_ascii {l : List UInt8} (hl : ∀ b ∈ l, b < 0x80) :
     (String.ofList (l.map ofByte)).toUTF8 = ⟨l.toArray⟩ := by
@@ -869,7 +913,7 @@ theorem accP_parseQuery (config : URI.Config) {q : List UInt8} (hq : QueryOk con
       rw [← hsplit]; exact List.mem_map_of_mem hp
     obtain ⟨p, hp', hpc⟩ := List.mem_map.mp hmem
     rw [toStringList_split, ← hpc, String.toList_ofList]
-    rcases hps p hp' with hk | ⟨k, v, rfl, hk, hv⟩
+    rcases hps p hp' with hk | ⟨k, vs, rfl, hk, hvne, hvs⟩
     · have hne : '=' ∉ p.map ofByte :=
         not_mem_map_ofByte (fun b hb => ⟨(qbyte_facts (hk.1 b hb)).1, (qbyte_facts (hk.1 b hb)).2.2.1⟩) (by decide)
       rw [List.splitOn_eq_singleton hne]
@@ -877,17 +921,29 @@ theorem accP_parseQuery (config : URI.Config) {q : List UInt8} (hq : QueryOk con
       simp only [List.map_cons, List.map_nil]
       rw [hx]
       simp
-    · have hk' : '=' ∉ k.map ofByte :=
-        not_mem_map_ofByte (fun b hb => ⟨(qbyte_facts (hk.1 b hb)).1, (qbyte_facts (hk.1 b hb)).2.2.1⟩) (by decide)
-      have hv' : '=' ∉ v.map ofByte :=
-        not_mem_map_ofByte (fun b hb => ⟨(qbyte_facts (hv.1 b hb)).1, (qbyte_facts (hv.1 b hb)).2.2.1⟩) (by decide)
-      have e : (k ++ EQ :: v).map ofByte = ['='].intercalate [k.map ofByte, v.map ofByte] := by
-        simp [List.intercalate_cons_cons]; rfl
-      rw [e, List.splitOn_intercalate '=' (by simp [hk', hv']) (by simp)]
+    · have hnoeq : ∀ l ∈ (k :: vs).map (List.map ofByte), '=' ∉ l := by
+        intro l hl
+        obtain ⟨v, hv, rfl⟩ := List.mem_map.mp hl
+        have hv' : QPart v := by
+          rcases List.mem_cons.mp hv with rfl | hv
+          · exact hk
+          · exact hvs v hv
+        exact not_mem_map_ofByte (fun b hb => ⟨(qbyte_facts (hv'.1 b hb)).1, (qbyte_facts (hv'.1 b hb)).2.2.1⟩)
+          (by decide)
+      obtain ⟨v1, vs', rfl⟩ := List.exists_cons_of_ne_nil hvne
+      have e : (k ++ EQ :: [EQ].intercalate (v1 :: vs')).map ofByte =
+          ['='].intercalate ((k :: v1 :: vs').map (List.map ofByte)) := by
+        rw [show k ++ EQ :: [EQ].intercalate (v1 :: vs') = [EQ].intercalate (k :: v1 :: vs') by
+          rw [List.intercalate_cons_cons]; simp]
+        rw [map_intercalate']; rfl
+      rw [e, List.splitOn_intercalate '=' hnoeq (by simp)]
       obtain ⟨x, hx⟩ := fromString?_ok hk
-      obtain ⟨y, hy⟩ := fromString?_ok hv
-      simp only [List.map_cons, List.map_nil, String.intercalate_singleton]
-      rw [hx, hy]
+      obtain ⟨y, hy⟩ := fromString?_ok (qpart_intercalate hvs)
+      simp only [List.map_cons, List.map_map]
+      have hval := intercalate_p3d (v1 :: vs')
+      simp only [List.map_cons] at hval
+      simp only [Function.comp_def]
+      rw [hx, hval, hy]
       simp
 
 /-! ## Combinators -/
@@ -1291,6 +1347,28 @@ theorem fails_bind {α β : Type} {p : Parser α} {g : α → Parser β} {w rest
 theorem fails_fail {α : Type} (msg : String) (input : List UInt8) : Fails (fail msg : Parser α) input :=
   fun it _ _ => ⟨it, _, rfl⟩
 
+theorem attempt_success {α : Type} {p : Parser α} {it j : It} {a : α} (h : p it = .success j a) :
+    attempt p it = .success j a := by
+  unfold attempt; rw [h]
+
+theorem attempt_error {α : Type} {p : Parser α} {it e : It} {err : Std.Internal.Parsec.Error}
+    (h : p it = .error e err) : attempt p it = .error it err := by
+  unfold attempt; rw [h]
+
+theorem bind_success {α β : Type} {p : Parser α} {g : α → Parser β} {it j : It} {a : α}
+    (h : p it = .success j a) : (p >>= g) it = g a j := by
+  show Std.Internal.Parsec.bind p g it = _; unfold Std.Internal.Parsec.bind; rw [h]
+
+theorem bind_error {α β : Type} {p : Parser α} {g : α → Parser β} {it e : It} {err : Std.Internal.Parsec.Error}
+    (h : p it = .error e err) : (p >>= g) it = .error e err := by
+  show Std.Internal.Parsec.bind p g it = _; unfold Std.Internal.Parsec.bind; rw [h]
+
+theorem fails_bind_left {α β : Type} {p : Parser α} {g : α → Parser β} {input : List UInt8}
+    (h : Fails p input) : Fails (p >>= g) input := by
+  intro it hb hu
+  obtain ⟨e, err, he⟩ := h it hb hu
+  exact ⟨e, err, bind_error he⟩
+
 theorem take_v4 {s r : List UInt8} (hs : s ≠ []) (hv : ∀ b ∈ s, V4Byte b) (hl : s.length ≤ 256)
     (hr : r = [] ∨ ∃ b r', r = b :: r' ∧ ¬ V4Byte b) :
     AccP (take1AtMost (fun x => decide (x = '.'.toUInt8 ∨ isDigitByte x = true)) 256) s r
@@ -1340,20 +1418,10 @@ theorem hostEnd_not_v4 {r : List UInt8} (hr : HostEnd r) : r = [] ∨ ∃ b r', 
     unfold V4Byte
     rcases hb with rfl | rfl | rfl <;> decide
 
-/-- A host as `Std.Http`'s `parseHost` reads it. -/
+/-- A host as `parseHost` reads it: a domain name (which includes the dotted-decimal form of an IPv4
+address), or a bracketed IPv6 literal that libuv accepts. -/
 inductive HostOk (cfg : URI.Config) : List UInt8 → Prop
-  /-- A domain name that does not begin with a digit. -/
-  | name {h : List UInt8} : DomainOk cfg h → (∀ b, h.head? = some b → isDigitByte b = false) → HostOk cfg h
-  /-- A domain name that begins with a digit: `Std.Http` first tries IPv4 on its leading digits and
-  dots `pre`, which libuv must reject. -/
-  | digitName {pre suf : List UInt8} : DomainOk cfg (pre ++ suf) → (∃ b t, pre = b :: t ∧ isDigitByte b = true) →
-      (∀ b ∈ pre, V4Byte b) → (∀ b, suf.head? = some b → ¬ V4Byte b) →
-      Std.Net.IPv4Addr.ofString (String.ofList (pre.map ofByte)) = none → HostOk cfg (pre ++ suf)
-  /-- An IPv4 literal that libuv accepts. -/
-  | ipv4 {s : List UInt8} {a : Std.Net.IPv4Addr} : (∃ b t, s = b :: t ∧ isDigitByte b = true) →
-      (∀ b ∈ s, V4Byte b) → s.length ≤ 256 →
-      Std.Net.IPv4Addr.ofString (String.ofList (s.map ofByte)) = some a → HostOk cfg s
-  /-- A bracketed IPv6 literal that libuv accepts. -/
+  | name {h : List UInt8} : DomainOk cfg h → HostOk cfg h
   | ipv6 {s : List UInt8} {a : Std.Net.IPv6Addr} : s ≠ [] → (∀ b ∈ s, V6Byte b) → s.length ≤ 256 →
       Std.Net.IPv6Addr.ofString (String.ofList (s.map ofByte)) = some a → HostOk cfg (LB :: s ++ [RB])
 
@@ -1407,8 +1475,15 @@ theorem toString_of_fromUTF8? {l : List UInt8} {str : String} (hl : ∀ b ∈ l,
     (h : String.fromUTF8? ⟨l.toArray⟩ = some str) : str = String.ofList (l.map ofByte) := by
   rw [← String.ofList_toList (s := str), toList_of_fromUTF8? hl h]
 
+def v4b (b : UInt8) : Bool := decide (b = '.'.toUInt8 ∨ isDigitByte b = true)
+
+theorem v4b_iff {b : UInt8} : v4b b = true ↔ V4Byte b := by
+  simp [v4b, V4Byte, DOT]
+
 /-- **The host parser reads every host that meets `HostOk`**, up to a `:`, `/`, `?` or the end of
-the input, and returns the host `HostIs` describes. -/
+the input, and returns the host `HostIs` describes. For a domain name that begins with a digit, the
+parser first tries IPv4 on its leading digits and dots: it returns an IPv4 address when libuv accepts
+them and they are the whole host, and the name otherwise. -/
 theorem accP_parseHost (config : URI.Config) {h r : List UInt8} (hh : HostOk config h) (hr : HostEnd r) :
     AccP (parseHost config) h r (HostIs h) := by
   unfold parseHost
@@ -1419,18 +1494,10 @@ theorem accP_parseHost (config : URI.Config) {h r : List UInt8} (hh : HostOk con
     | @ipv6 s a hs hv hl ha =>
       exact accP_bind_nil (accP_parseIPv6 hs hv hl ha)
         (fun x hx => accP_mono (accP_pure _ _) (fun H hH => by subst hH; subst hx; exact ⟨s, rfl, ha⟩))
-    | name hd _ =>
+    | name hd =>
       exfalso; obtain ⟨b, t, e, hb⟩ := domain_head hd
       have := (domain_bytes hd b (by rw [e]; simp)).2.1
       rw [e] at hc; simp [Option.filter, this] at hc
-    | digitName _ hfirst _ _ _ =>
-      exfalso; obtain ⟨b, t, rfl, hb⟩ := hfirst
-      have : b ≠ '['.toUInt8 := by intro e; subst e; exact absurd hb (by decide)
-      simp [Option.filter, this] at hc
-    | ipv4 hfirst _ _ _ =>
-      exfalso; obtain ⟨b, t, rfl, hb⟩ := hfirst
-      have : b ≠ '['.toUInt8 := by intro e; subst e; exact absurd hb (by decide)
-      simp [Option.filter, this] at hc
   refine accP_bind0 (accP_peekWhen? _ _) (fun a' ha' => ?_)
   subst ha'
   extract_lets jp
@@ -1454,56 +1521,85 @@ theorem accP_parseHost (config : URI.Config) {h r : List UInt8} (hh : HostOk con
     simp only []
     rw [dif_pos (domain_valid hd hsl')]
     exact accP_mono (accP_pure _ _) (fun H hH => by subst hH; exact ⟨by show str.toLower = _; rw [hstr'], hlb, hv4⟩)
-  refine accP_ite (fun hd' => ?_) (fun hd' => ?_)
-  · unfold tryOpt
-    cases hh with
-    | ipv4 hfirst hv hl ha =>
-      obtain ⟨b, t, rfl, hb⟩ := hfirst
-      exact accP_bind_nil (accP_optional_some (accP_attempt (accP_parseIPv4 (by simp) hv hl
-        (hostEnd_not_v4 hr) ha))) (fun o ⟨a, ha', ho⟩ => by
-          subst ho; subst ha'
-          exact accP_mono (accP_pure _ _) (fun H hH => by subst hH; exact ⟨hv, ha⟩))
-    | @digitName pre suf hd hfirst hv hsuf ha =>
-      have hpre : pre ≠ [] := by obtain ⟨b, t, rfl, -⟩ := hfirst; simp
-      have hl : pre.length ≤ 256 := by have := hd.2.1; simp at this; omega
+  cases hh with
+  | ipv6 => exfalso; simp [Option.filter, LB] at hc
+  | name hd =>
+    obtain ⟨b0, t0, e0, hb0⟩ := domain_head hd
+    have hlb : h.head? ≠ some LB := by
+      rw [e0]; intro h'; simp at h'; subst h'; exact absurd hb0 (by decide)
+    have hbyte := domain_bytes hd
+    by_cases hdig : isDigitByte b0 = true
+    · refine accP_ite (fun _ => ?_) (fun hc' => absurd (by rw [e0]; simp [Option.filter, hdig]) hc')
+      unfold tryOpt
+      -- the leading digits and dots, and the rest of the name
+      have hsplit : h = h.takeWhile v4b ++ h.dropWhile v4b := (List.takeWhile_append_dropWhile).symm
+      have hpv : ∀ b ∈ h.takeWhile v4b, V4Byte b := fun b hb =>
+        v4b_iff.mp (List.all_eq_true.mp (List.all_takeWhile (p := v4b) (l := h)) b hb)
+      have hsv : ∀ c s', h.dropWhile v4b = c :: s' → ¬ V4Byte c := by
+        intro c s' e he
+        have := List.head_dropWhile_not v4b (l := h) (by rw [e]; simp)
+        simp only [e, List.head_cons] at this
+        rw [v4b_iff.mpr he] at this
+        cases this
+      generalize hpre : h.takeWhile v4b = pre at hsplit hpv
+      generalize hsuf : h.dropWhile v4b = suf at hsplit hsv
+      have hpne : pre ≠ [] := by
+        rw [← hpre, e0, List.takeWhile_cons_of_pos (by rw [v4b_iff]; exact Or.inr hdig)]; simp
+      have hl : pre.length ≤ 256 := by
+        have h1 := hd.2.1
+        have h2 : pre.length ≤ h.length := by rw [hsplit]; simp
+        omega
       have hend : (suf ++ r) = [] ∨ ∃ b r', suf ++ r = b :: r' ∧ ¬ V4Byte b := by
         cases suf with
         | nil => simpa using hostEnd_not_v4 hr
-        | cons c suf' => exact Or.inr ⟨c, suf' ++ r, rfl, hsuf c rfl⟩
-      have hf := fails_parseIPv4 hpre hv hl hend ha
-      refine accP_bind0 (accP_optional_none (ncf_attempt (fun it hb hu => hf it hb (by rw [hu]; simp)))) ?_
-      intro o ho
-      subst ho
-      refine htail hd ?_ ?_
-      · obtain ⟨b, t, rfl, hb⟩ := hfirst
-        intro e; simp at e; subst e; exact absurd hb (by decide)
-      · cases suf with
-        | nil => right; simpa using ha
-        | cons c suf' => left; intro hall; exact hsuf c rfl (hall c (by simp))
-    | name hd hnd =>
-      exfalso; obtain ⟨b, t, e, -⟩ := domain_head hd
-      have := hnd b (by rw [e]; rfl)
-      rw [e] at hd'; simp [Option.filter, this] at hd'
-    | ipv6 =>
-      exfalso; simp [Option.filter, LB] at hc
-  · cases hh with
-    | name hd hnd =>
-      obtain ⟨b, t, e, hba⟩ := domain_head hd
-      have hnd' := hnd b (by rw [e]; rfl)
-      refine htail hd ?_ (Or.inl ?_)
-      · rw [e]; intro h'; simp at h'; subst h'; exact absurd hba (by decide)
-      · intro hall
-        rcases hall b (by rw [e]; simp) with h' | h'
-        · subst h'; exact absurd hba (by decide)
-        · rw [hnd'] at h'; cases h'
-    | digitName _ hfirst _ _ _ =>
-      exfalso; obtain ⟨b, t, rfl, hb⟩ := hfirst
-      simp [Option.filter, hb] at hd'
-    | ipv4 hfirst _ _ _ =>
-      exfalso; obtain ⟨b, t, rfl, hb⟩ := hfirst
-      simp [Option.filter, hb] at hd'
-    | ipv6 =>
-      exfalso; simp [Option.filter, LB] at hc
+        | cons c suf' => exact Or.inr ⟨c, suf' ++ r, rfl, hsv c suf' rfl⟩
+      have hin : h ++ r = pre ++ (suf ++ r) := by rw [hsplit, List.append_assoc]
+      cases hof : Std.Net.IPv4Addr.ofString (String.ofList (pre.map ofByte)) with
+      | none =>
+        have hf := fails_parseIPv4 hpne hpv hl hend hof
+        refine accP_bind0 (accP_optional_none (ncf_attempt (fun it hb hu => ?_))) (fun o ho => ?_)
+        · obtain ⟨e, err, he⟩ := hf it hb (by rw [hu, hin])
+          exact ⟨e, err, bind_error he⟩
+        · subst ho
+          refine htail hd hlb ?_
+          cases suf with
+          | nil => right; rw [hsplit, List.append_nil]; exact hof
+          | cons c suf' => left; intro hall; exact hsv c suf' rfl (hall c (by rw [hsplit]; simp))
+      | some a =>
+        cases suf with
+        | nil =>
+          have hh' : h = pre := by rw [hsplit, List.append_nil]
+          refine accP_bind_nil (accP_optional_some (accP_attempt (P := (· = a)) ?_)) (fun o ⟨a', ha', ho⟩ => ?_)
+          · rw [hh']
+            refine accP_bind_nil (accP_parseIPv4 hpne hpv hl (hostEnd_not_v4 hr) hof) (fun ip hip => ?_)
+            refine accP_bind0 (accP_peekWhen? _ _) (fun l hl' => ?_)
+            subst hl'
+            simp only []
+            refine accP_ite (fun hc' => absurd hc' ?_) (fun _ => accP_mono (accP_pure _ _) (fun x hx => hx.trans hip))
+            rcases hr with rfl | ⟨c, r', rfl, hcb⟩
+            · simp
+            · rcases hcb with rfl | rfl | rfl <;> simp [Option.filter] <;> decide
+          · subst ho; subst ha'
+            exact accP_mono (accP_pure _ _) (fun H hH => by subst hH; rw [hh']; exact ⟨hpv, hof⟩)
+        | cons c suf' =>
+          have hc : decide (isAlphaNum c = true ∨ c = '-'.toUInt8 ∨ c = '.'.toUInt8) = true :=
+            (hbyte c (by rw [hsplit]; simp)).2.2
+          refine accP_bind0 (accP_optional_none (ncf_attempt (fun it hb hu => ?_))) (fun o ho => ?_)
+          · refine fails_bind (accP_parseIPv4 hpne hpv hl hend hof) (fun ip hip => ?_) it hb (by rw [hu, hin])
+            refine fails_bind (w := []) (accP_peekWhen? _ _) (fun l hl' => ?_)
+            subst hl'
+            simp only []
+            rw [if_pos (by simp [Option.filter, hc])]
+            exact fails_bind_left (fails_fail _ _)
+          · subst ho
+            refine htail hd hlb (Or.inl ?_)
+            intro hall; exact hsv c suf' rfl (hall c (by rw [hsplit]; simp))
+    · refine accP_ite (fun hc' => absurd hc' (by rw [e0]; simp [Option.filter, hdig])) (fun _ => ?_)
+      refine htail hd hlb (Or.inl ?_)
+      intro hall
+      rcases hall b0 (by rw [e0]; simp) with h' | h'
+      · subst h'; exact absurd hb0 (by decide)
+      · exact hdig h'
 
 /-! ## The Host header -/
 
@@ -1772,22 +1868,6 @@ theorem staysIn_takeAtMost (pred : UInt8 → Bool) (n : Nat) {A R : List UInt8}
     simp only [ByteArray.Iterator.remainingBytes] at hrem hb ⊢
     omega
 
-theorem attempt_success {α : Type} {p : Parser α} {it j : It} {a : α} (h : p it = .success j a) :
-    attempt p it = .success j a := by
-  unfold attempt; rw [h]
-
-theorem attempt_error {α : Type} {p : Parser α} {it e : It} {err : Std.Internal.Parsec.Error}
-    (h : p it = .error e err) : attempt p it = .error it err := by
-  unfold attempt; rw [h]
-
-theorem bind_success {α β : Type} {p : Parser α} {g : α → Parser β} {it j : It} {a : α}
-    (h : p it = .success j a) : (p >>= g) it = g a j := by
-  show Std.Internal.Parsec.bind p g it = _; unfold Std.Internal.Parsec.bind; rw [h]
-
-theorem bind_error {α β : Type} {p : Parser α} {g : α → Parser β} {it e : It} {err : Std.Internal.Parsec.Error}
-    (h : p it = .error e err) : (p >>= g) it = .error e err := by
-  show Std.Internal.Parsec.bind p g it = _; unfold Std.Internal.Parsec.bind; rw [h]
-
 theorem staysIn_satisfy {q : UInt8 → Bool} {A R : List UInt8} (hR : ∀ b r', R = b :: r' → q b = false) :
     StaysIn (satisfy q) A R := by
   intro it hb A' hA hu
@@ -1861,12 +1941,6 @@ theorem fails_of_staysIn {α β : Type} {p : Parser α} {g : α → Parser β} {
     show Std.Internal.Parsec.bind p g it = _
     unfold Std.Internal.Parsec.bind; rw [hj]; exact he
 
-theorem fails_bind_left {α β : Type} {p : Parser α} {g : α → Parser β} {input : List UInt8}
-    (h : Fails p input) : Fails (p >>= g) input := by
-  intro it hb hu
-  obtain ⟨e, err, he⟩ := h it hb hu
-  exact ⟨e, err, bind_error he⟩
-
 theorem fails_ite {c : Prop} [Decidable c] {α : Type} {p q : Parser α} {input : List UInt8}
     (hp : Fails p input) (hq : Fails q input) : Fails (if c then p else q) input := by
   split
@@ -1921,24 +1995,13 @@ theorem digit_not_alpha : ∀ b : UInt8, isDigitByte b = true → isAlphaByte b 
 theorem hostOk_head {cfg : URI.Config} {h : List UInt8} (hh : HostOk cfg h) :
     ∃ b t, h = b :: t ∧ b ≠ '*'.toUInt8 ∧ b ≠ SL ∧ (isAlphaByte b = true → ∀ c ∈ h, c ≠ COL) := by
   cases hh with
-  | name hd hnd =>
+  | name hd =>
     obtain ⟨b, t, e, hb⟩ := domain_head hd
     refine ⟨b, t, e, ?_, ?_, fun _ c hc => ?_⟩
-    · have := (host_byte b (Or.inl hb)).2.2.2
-      intro h'; subst h'; exact absurd hb (by decide)
+    · intro h'; subst h'; exact absurd hb (by decide)
     · intro h'; subst h'; exact absurd hb (by decide)
     · have := (domain_bytes hd c hc).2.2
       intro h'; subst h'; exact absurd this (by decide)
-  | digitName _ hfirst _ _ _ =>
-    obtain ⟨b, t, rfl, hb⟩ := hfirst
-    refine ⟨b, t ++ _, rfl, ?_, ?_, fun ha => absurd ha (by simp [digit_not_alpha b hb])⟩
-    · intro h'; subst h'; exact absurd hb (by decide)
-    · intro h'; subst h'; exact absurd hb (by decide)
-  | ipv4 hfirst _ _ _ =>
-    obtain ⟨b, t, rfl, hb⟩ := hfirst
-    refine ⟨b, t, rfl, ?_, ?_, fun ha => absurd ha (by simp [digit_not_alpha b hb])⟩
-    · intro h'; subst h'; exact absurd hb (by decide)
-    · intro h'; subst h'; exact absurd hb (by decide)
   | ipv6 =>
     exact ⟨LB, _, rfl, by decide, by decide, fun ha => absurd ha (by decide)⟩
 
@@ -2156,24 +2219,16 @@ theorem ncf_userinfo (config : URI.Config) {A R : List UInt8} (hA : ∀ c ∈ A,
 
 theorem hostOk_no_at {cfg : URI.Config} {h : List UInt8} (hh : HostOk cfg h) : ∀ c ∈ h, c ≠ AT := by
   cases hh with
-  | name hd _ =>
+  | name hd =>
     intro c hc e; subst e
     exact absurd (domain_bytes hd _ hc).2.2 (by decide)
-  | digitName hd _ _ _ _ =>
-    intro c hc e; subst e
-    exact absurd (domain_bytes hd _ hc).2.2 (by decide)
-  | ipv4 _ hv _ _ =>
-    intro c hc e; subst e
-    rcases hv _ hc with h | h
-    · exact absurd h (by decide)
-    · exact absurd h (by decide)
   | ipv6 _ hv _ _ =>
     intro c hc e; subst e
-    simp only [List.cons_append, List.mem_cons, List.mem_append, List.mem_singleton] at hc
+    simp only [List.cons_append, List.mem_cons, List.mem_append] at hc
     rcases hc with h | h | h
     · exact absurd h (by decide)
     · rcases hv _ h with h' | h' | h' <;> exact absurd h' (by decide)
-    · exact absurd h (by decide)
+    · simp at h; exact absurd h (by decide)
 
 theorem portPart_no_at {p : List UInt8} (hp : PortPart p) : ∀ c ∈ p, c ≠ AT := by
   cases hp with
@@ -2506,5 +2561,56 @@ theorem reqOk_host {R : HttpSpec.RealSplitComplete.Req}
     rcases hv with hv | hv
     · rw [h10] at hv; cases hv
     · exact absurd rfl hv
+
+/-! ## Examples -/
+
+theorem pctOk_of_noPct : ∀ {w : List UInt8}, (∀ b ∈ w, b ≠ '%'.toUInt8) → PctOk w
+  | [], _ => .nil
+  | b :: w, h => .cons (h b (by simp)) (pctOk_of_noPct (fun c hc => h c (List.mem_cons_of_mem _ hc)))
+
+theorem qpart_ascii {w : List UInt8} (hq : ∀ b ∈ w, QByte b) (hp : ∀ b ∈ w, b ≠ '%'.toUInt8) : QPart w :=
+  ⟨hq, pctOk_of_noPct hp⟩
+
+theorem qbyte_of {w : List UInt8} (h : w.all (fun b => isQueryChar b && b != AMP && b != EQ) = true) :
+    ∀ b ∈ w, QByte b := by
+  intro b hb
+  have := List.all_eq_true.mp h b hb
+  simp only [Bool.and_eq_true, bne_iff_ne, ne_eq] at this
+  exact Or.inl ⟨this.1.1, this.1.2, this.2⟩
+
+/-- `/a?token=YWJj==`, which the shipped parser rejects (FINDINGS §9). -/
+theorem origin_token : Origin {} (HttpSpec.Chunked.ascii "/a?token=YWJj==") := by
+  have e : HttpSpec.Chunked.ascii "/a?token=YWJj==" =
+      SL :: joinSl [HttpSpec.Chunked.ascii "a"] ++ QM :: HttpSpec.Chunked.ascii "token=YWJj==" := by decide
+  rw [e]
+  refine .query ⟨fun s hs => ?_, by simp, by decide, by decide⟩ ⟨by decide, [HttpSpec.Chunked.ascii "token=YWJj=="],
+    by simp, by simp, fun p hp => ?_, by decide⟩
+  · simp at hs; subst hs
+    exact ⟨by decide, pctOk_of_noPct (by decide), by decide⟩
+  · simp at hp; subst hp
+    refine Or.inr ⟨HttpSpec.Chunked.ascii "token", [HttpSpec.Chunked.ascii "YWJj", [], []], by decide,
+      qpart_ascii (qbyte_of (by decide)) (by decide), by simp, fun v hv => ?_⟩
+    simp at hv
+    rcases hv with rfl | rfl
+    · exact qpart_ascii (qbyte_of (by decide)) (by decide)
+    · exact ⟨by simp, .nil⟩
+
+/-- `1.2.3.4-x.example`, which the shipped parser rejects (FINDINGS §9). -/
+theorem domain_dotted : DomainOk {} (HttpSpec.Chunked.ascii "1.2.3.4-x.example") := by
+  refine ⟨by decide, by decide, [HttpSpec.Chunked.ascii "1", HttpSpec.Chunked.ascii "2",
+    HttpSpec.Chunked.ascii "3", HttpSpec.Chunked.ascii "4-x", HttpSpec.Chunked.ascii "example"], by simp,
+    by decide, fun l hl => ?_⟩
+  simp only [List.mem_cons, List.mem_nil_iff, or_false] at hl
+  rcases hl with rfl | rfl | rfl | rfl | rfl <;>
+    exact ⟨by decide, by decide, ⟨_, rfl, by decide⟩, ⟨_, rfl, by decide⟩⟩
+
+/-- **`GET /a?token=YWJj==` with `Host: 1.2.3.4-x.example`**, both rejected by the shipped parser
+(FINDINGS §9), passes the patched target parser, the method check and the Host check, whatever libuv
+answers for `1.2.3.4`. -/
+theorem example_fixed : ∃ T, HttpSpec.Strict.parseTarget (HttpSpec.Chunked.ascii "/a?token=YWJj==") = .ok T ∧
+    TargetSuits .get T ∧ ∀ V : Header.Value,
+      HttpSpec.Chunked.ascii V.value = HttpSpec.Chunked.ascii "1.2.3.4-x.example" → HostAccepted T V = true :=
+  targetHost_ok (.origin (by decide) origin_token
+    (Or.inr ⟨HttpSpec.Chunked.ascii "1.2.3.4-x.example", [], by simp, .name domain_dotted, .none⟩))
 
 end HttpSpec.URIComplete

@@ -157,15 +157,22 @@ Found while proving that the URI and Host parsers accept every valid target and 
   value then goes through `EncodedQueryParam.fromString?`, whose character class
   (`isQueryDataChar`) excludes `=`, so the whole target is rejected. RFC 3986 allows `=` anywhere
   in a query, and raw `=` in values is common: base64 padding (`?token=YWJj==`), nested URLs
-  (`?next=/home?tab=1`). Percent-encoded (`?b=c%3Dd`) is accepted.
+  (`?next=/home?tab=1`). Percent-encoded (`?b=c%3Dd`) is accepted. Upstream's own test
+  (`tests/elab/async_http_uri.lean`) expects `/path?key=a=b` to be rejected. Already reported by
+  another user as [leanprover/lean4#16021](https://github.com/leanprover/lean4/issues/16021).
 - **A host name that begins with a dotted-quad.** `parseHost` first tries IPv4 on the leading
   digits and dots and falls back to a DNS name only if libuv rejects them. When libuv accepts them,
   it returns that address and leaves the rest of the name unread, and the Host check fails:
   `1.2.3.4-x.example` and `1.2.3.4x.example` (valid DNS names) get 400; so do the same names in
   authority-form and absolute-form targets. `1.2.3.4.nip.io` (libuv rejects `1.2.3.4.`) and
   `123.example.com` are accepted. RFC 3986 §3.2.2 makes a host an IPv4 literal only if the whole
-  host matches `IPv4address`.
+  host matches `IPv4address`. Reported as
+  [leanprover/lean4#16058](https://github.com/leanprover/lean4/issues/16058).
 
-Not yet reported upstream. The completeness theorems state both as conditions: at most one `=` in
-each query parameter, and, for a name that begins with a digit, libuv rejects its leading digits
-and dots.
+The patched copy (`fix/src/HttpFix/Data/URI/Parser.lean`) fixes both: `parseQuery` keeps the `=`
+after the first, percent-encoded, in the value (`String.intercalate "%3D" value`, so `key=a=b`
+reads like `key=a%3Db`; the copy's `async_http_uri.lean` test expects this), and the IPv4 attempt in
+`parseHost` fails when a name byte follows the address, so the name parser runs. IPv4 literals are
+still read as IPv4. With the host change alone the FRO tests pass unchanged; with both, all pass
+after that one expectation is changed. The completeness theorems are about the fixed parser and do
+not need either restriction.

@@ -40,7 +40,6 @@ theorem host_a : URIComplete.HostOk {} (ascii "a") :=
   .name ⟨by decide, by decide, [ascii "a"], by simp, rfl, fun l hl => by
       simp at hl; subst hl
       exact ⟨by decide, by decide, ⟨_, rfl, by decide⟩, ⟨_, rfl, by decide⟩⟩⟩
-    (fun b hb => by simp [ascii] at hb; subst hb; decide)
 
 theorem vals_of (n : String) (ls : List (List UInt8 × List UInt8)) {vs : List (List UInt8)}
     (hf : lines0.filter (fun l => l.2.map toLowerAscii == ascii n) = ls)

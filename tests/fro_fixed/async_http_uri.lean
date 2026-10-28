@@ -973,9 +973,15 @@ info: Std.Http.RequestTarget.absoluteForm
   | .error _ => false
 
 -- parseQuery uses `split '='` instead of `splitOn "="`.
--- A pair containing more than one unencoded `=` must be rejected because the
--- three-element split falls into the error branch.
-#eval parseCheckFail "/path?key=a=b"
+-- Patched copy: an `=` after the first is part of the value (RFC 3986 allows `=` in a query) and is
+-- kept percent-encoded, so `key=a=b` reads like `key=a%3Db` below. (Upstream rejects it.)
+/--
+info: some (some "a%3Db")
+-/
+#guard_msgs in
+#eval show IO _ from do
+  let result ← runParser parseRequestTarget "/path?key=a=b"
+  IO.println (repr (result.query.find? "key"))
 
 -- A percent-encoded `=` in the value is fine; `%3D` is preserved as-is in
 -- the EncodedQueryParam.
