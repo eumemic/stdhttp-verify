@@ -73,7 +73,7 @@ theorem req0 : ∃ R : Req, ReqOk {} 0 R ∧ R.bytes = reqBytes ∧ R.d = ascii 
   refine ⟨R0 (.originForm p q), ⟨?_, by simp only [R0]; decide, by simp only [R0]; decide, hT, by simp only [R0]; decide, Or.inl rfl, ?_,
     by simp only [R0]; decide, by simp only [R0, Req.hdr]; decide,
     ⟨⟨(fun h => by cases h), (fun h => False.elim h)⟩, (fun h => by cases h)⟩, ?_,
-    Or.inr (vals_of "expect" [] (by decide) .nil), vals_of "transfer-encoding" [] (by decide) .nil,
+    vals_of "transfer-encoding" [] (by decide) .nil,
     vals_of "content-length" [(ascii "Content-Length: 1", ascii "Content-Length")] (by decide)
       (.cons ⟨ascii " ", [], by decide, by decide, by decide, by decide⟩ .nil),
     Assigns.length ⟨by decide, by decide, by decide⟩, Or.inl rfl, .length rfl (by decide)⟩,
@@ -116,7 +116,8 @@ theorem example_request : ∃ k m' ps, pullN k m0.processRead = (m', ps) ∧ Del
   obtain ⟨R, hR, hby, hd, hl, hrl, hw⟩ := req0
   obtain ⟨fields, -, -, h⟩ := request_read (m := m0) (rest := []) rfl (Nat.zero_le _)
     rfl rfl (by rw [show unread m0.reader.input = reqBytes from rfl, ← hby]; simp [Req.bytes, Req.hdr]) hR.line hR.len hR.meth hR.target hR.ver hR.ver1 hR.hl hR.hn
-    (by have := hR.hb; simp only [Req.hdr] at this; exact this) hR.suits hR.host hR.exp hR.hte hR.hcl hR.assigns hR.std hR.fits
+    (by have := hR.hb; simp only [Req.hdr] at this; exact this) hR.suits hR.host
+    (Or.inr (by rw [hl]; exact vals_of "expect" [] (by decide) .nil)) hR.hte hR.hcl hR.assigns hR.std hR.fits
   rw [hd] at h
   exact h
 
@@ -132,15 +133,20 @@ theorem fedOf_byteOps : ∀ l : List UInt8, fedOf (byteOps l) = l
     rw [show fedOf (List.flatMap (fun b => [Op.feed ⟨#[b]⟩, Op.step, Op.pullBody]) l) = l from fedOf_byteOps l]
     rfl
 
+theorem validOps_byteOps : ∀ l : List UInt8, ValidOps (byteOps l)
+  | [] => trivial
+  | b :: l => by
+    simp only [byteOps, List.flatMap_cons, List.cons_append, List.nil_append] at *
+    exact validOps_byteOps l
+
 /-- **The same request, one byte per read**, on a fresh machine: after each byte the server steps and
 pulls; then one more step and pulls complete the body, and the pulls handed out `x`. -/
 theorem example_split : ∃ k, Final ((runP (byteOps reqBytes) { config := {} }).2 ++
-    (runP (List.replicate k .pullBody) (runP (byteOps reqBytes) { config := {} }).1.step.1).2) (ascii "x") := by
+    (runP (List.replicate k .pullBody)
+      ((runP (byteOps reqBytes) { config := {} }).1.step.1.canContinue .continue)).2) (ascii "x") := by
   obtain ⟨R, hR, hby, hd, -⟩ := req0
-  obtain ⟨k, hk, -⟩ := split_read (rest := []) hR { config := {} }
-    ⟨rfl, Nat.zero_le _, rfl, rfl, rfl, rfl, rfl⟩ rfl rfl (byteOps reqBytes)
-    (by intro op hop; simp only [byteOps, List.mem_flatMap, List.mem_cons, List.mem_nil_iff, or_false] at hop
-        obtain ⟨b, -, rfl | rfl | rfl⟩ := hop <;> trivial)
+  obtain ⟨k, hk, -⟩ := split_read_bound (rest := []) hR { config := {} } (byteOps reqBytes)
+    ⟨rfl, Nat.zero_le _, rfl, rfl, rfl, fun _ => rfl, rfl⟩ rfl rfl (validOps_byteOps reqBytes)
     (by rw [fedOf_byteOps, hby]; rfl) (by rw [hby]; decide)
   rw [hd] at hk
   exact ⟨k, hk⟩

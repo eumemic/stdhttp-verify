@@ -226,12 +226,22 @@ def InBody (m : Machine .receiving) (ω ρ y rest : List UInt8) : Prop :=
   ∃ bs, m.reader.state = .readBody bs ∧ BodyRest m.config bs ω ρ ∧
     unread m.reader.input ++ y = ω ++ rest ∧ InBounds m ∧
     m.reader.bodyBytesRead + ρ.length ≤ m.config.maxBodySize ∧ m.writer.sentMessage = false ∧
-    m.reader.noMoreInput = false
+    (y ≠ [] → m.reader.noMoreInput = false)
+
+/-- The machine is waiting for the application's answer to `Expect: 100-continue`, with the body's
+rest `ω` (carrying `ρ`) to read once it goes on. -/
+def InWait (m : Machine .receiving) (ω ρ y rest : List UInt8) : Prop :=
+  ∃ bs, m.reader.state = .continue (.readBody bs) ∧ BodyRest m.config bs ω ρ ∧
+    unread m.reader.input ++ y = ω ++ rest ∧ InBounds m ∧
+    m.reader.bodyBytesRead + ρ.length ≤ m.config.maxBodySize ∧ m.writer.sentMessage = false ∧
+    (y ≠ [] → m.reader.noMoreInput = false)
 
 /-- What a body step leaves alone. -/
 def Keeps (m m' : Machine .receiving) : Prop :=
   m'.config = m.config ∧ m'.writer = m.writer ∧ m'.reader.messageHead = m.reader.messageHead ∧
     m'.reader.noMoreInput = m.reader.noMoreInput
+
+theorem ne_nil_append {α : Type} {a b : List α} (h : b ≠ []) : a ++ b ≠ [] := by simp [h]
 
 theorem keeps_refl (m : Machine .receiving) : Keeps m m := ⟨rfl, rfl, rfl, rfl⟩
 
@@ -292,7 +302,7 @@ theorem next_fixed {m : Machine .receiving} {r : Nat} {ρ y rest : List UInt8}
     (hst : m.reader.state = .readBody (.fixed r)) (hρ : ρ.length = r) (hib : InBounds m)
     (hu : unread m.reader.input ++ y = ρ ++ rest)
     (hfit : m.reader.bodyBytesRead + ρ.length ≤ m.config.maxBodySize)
-    (hs : m.writer.sentMessage = false) (hn : m.reader.noMoreInput = false) :
+    (hs : m.writer.sentMessage = false) (hn : y ≠ [] → m.reader.noMoreInput = false) :
     PullOut m m.pullNextChunk.1 m.pullNextChunk.2 ρ y rest := by
   -- all of the rest unread: one pull completes the body
   have hall : ∀ c', unread m.reader.input = ρ ++ c' → c' ++ y = rest →
@@ -317,7 +327,7 @@ theorem next_fixed {m : Machine .receiving} {r : Nat} {ρ y rest : List UInt8}
     by_cases hu0 : unread m.reader.input = []
     · -- nothing unread: wait
       have hpw := parseWith_eof_none (m := m) (p := parseFixedSizeData r) (expect := some r)
-        (oh := fun _ => .badMessage) (fixedSizeData_empty hu0) hn
+        (oh := fun _ => .badMessage) (fixedSizeData_empty hu0) (hn (by rw [hy]; simp [ha0]))
       have hpb : m.parseBody (.fixed r) = (m.addEvent (.needMoreData (some r)), none, false) := by
         rw [parseBody_fixed_pos' m hr]; unfold Machine.parseFixedBody; rw [hpw]; rfl
       rw [pull_stop hst hpb (by simp)]
@@ -421,7 +431,7 @@ theorem next_data {m : Machine .receiving} {ext : Array (Chunk.ExtensionName × 
     (hcs : ∀ c ∈ cs, ChunkFits m.config c) (hl : LastFits m.config line items) (hib : InBounds m)
     (hu : unread m.reader.input ++ y = part ++ CRLF ++ chunkBytes cs ++ line ++ items.flatten ++ CRLF ++ rest)
     (hfit : m.reader.bodyBytesRead + (part ++ (cs.map (·.2)).flatten).length ≤ m.config.maxBodySize)
-    (hs : m.writer.sentMessage = false) (hn : m.reader.noMoreInput = false) :
+    (hs : m.writer.sentMessage = false) (hn : y ≠ [] → m.reader.noMoreInput = false) :
     PullOut m m.pullNextChunk.1 m.pullNextChunk.2 (part ++ (cs.map (·.2)).flatten) y rest := by
   have epb : m.parseBody (.chunkedBody ext r) = m.parseChunkedBodyState ext r := by
     obtain ⟨r', rfl⟩ : ∃ r', r = r' + 1 := ⟨r - 1, by omega⟩
@@ -430,7 +440,7 @@ theorem next_data {m : Machine .receiving} {ext : Array (Chunk.ExtensionName × 
       PullOut m m.pullNextChunk.1 m.pullNextChunk.2 (part ++ (cs.map (·.2)).flatten) y rest := by
     intro e hy0 he
     have hpw := parseWith_eof_none (m := m) (p := parseChunkSizedData r) (expect := some r)
-      (oh := fun _ => .badMessage) he hn
+      (oh := fun _ => .badMessage) he (hn hy0)
     have hpb : m.parseBody (.chunkedBody ext r) = (m.addEvent (.needMoreData (some r)), none, false) := by
       rw [epb]; unfold Machine.parseChunkedBodyState; rw [hpw]; rfl
     rw [pull_stop hst hpb (by simp)]
@@ -508,7 +518,7 @@ theorem next_last {m : Machine .receiving} {ext : Array (Chunk.ExtensionName × 
     (hn : items.length ≤ m.config.maxTrailerHeaders) (hib : InBounds m)
     (hu : unread m.reader.input ++ y = items.flatten ++ CRLF ++ rest)
     (hfit : m.reader.bodyBytesRead ≤ m.config.maxBodySize)
-    (hs : m.writer.sentMessage = false) (hnm : m.reader.noMoreInput = false) :
+    (hs : m.writer.sentMessage = false) (hnm : y ≠ [] → m.reader.noMoreInput = false) :
     PullOut m m.pullNextChunk.1 m.pullNextChunk.2 [] y rest := by
   have epb : m.parseBody (.chunkedBody ext 0) = m.parseLastChunkBodyState ext := rfl
   have hall' : ∀ c', unread m.reader.input = items.flatten ++ CRLF ++ c' → c' ++ y = rest →
@@ -528,7 +538,7 @@ theorem next_last {m : Machine .receiving} {ext : Array (Chunk.ExtensionName × 
     obtain ⟨e, he⟩ := pcu_short (pcu_parseLastChunkBody m.config) hacc hib hu
       (by have := congrArg List.length hw; simp only [List.length_append] at this ⊢; omega)
     have hpw := parseWith_eof_none (m := m) (p := parseLastChunkBody m.config) (expect := none)
-      (oh := fun _ => .badMessage) he hnm
+      (oh := fun _ => .badMessage) he (hnm (by rw [hy]; simp [ha0]))
     have hpb : m.parseBody (.chunkedBody ext 0) = (m.addEvent (.needMoreData none), none, false) := by
       rw [epb]; unfold Machine.parseLastChunkBodyState; rw [hpw]; rfl
     rw [pull_stop hst hpb (by simp)]
@@ -543,7 +553,8 @@ theorem next_sizeLine {m : Machine .receiving} {L Q ρ y rest ω : List UInt8} {
     (hst : m.reader.state = .readBody .chunkedSize)
     (hL : HttpSpec.Strict.ChunkSizeLineFits (clim m.config) L s) (hll : L.length ≤ m.config.maxChunkLineLength)
     (hmax : s ≤ m.config.maxChunkSize) (hfit : m.reader.bodyBytesRead + s ≤ m.config.maxBodySize)
-    (hib : InBounds m) (hu : unread m.reader.input ++ y = L ++ Q ++ rest) (hn : m.reader.noMoreInput = false)
+    (hib : InBounds m) (hu : unread m.reader.input ++ y = L ++ Q ++ rest)
+    (hn : y ≠ [] → m.reader.noMoreInput = false)
     (hin : InBody m ω ρ y rest)
     (k : ∀ (ext : Array (Chunk.ExtensionName × Option Chunk.ExtensionValue)) (m1 : Machine .receiving),
       m1.reader.state = .readBody (.chunkedBody ext s) → unread m1.reader.input ++ y = Q ++ rest →
@@ -570,7 +581,7 @@ theorem next_sizeLine {m : Machine .receiving} {L Q ρ y rest ω : List UInt8} {
       (by have := congrArg List.length hw; simp only [List.length_append] at this ⊢; omega)
     have he0 : unread e = [] := eofEnd_parseChunkSize m.config _ _ he
     have hpw := parseWith_eof_some (m := m) (p := parseChunkSize m.config) (expect := none)
-      (oh := fun _ => .badMessage) m.config.maxChunkLineLength he hn
+      (oh := fun _ => .badMessage) m.config.maxChunkLineLength he (hn (by rw [hy]; simp [ha0]))
     have hlt : ¬ m.reader.input.remainingBytes - e.remainingBytes ≥ m.config.maxChunkLineLength := by
       rw [remainingBytes_unread, remainingBytes_unread, he0]
       have : (unread m.reader.input).length < L.length := by
@@ -599,7 +610,7 @@ theorem next_size {m : Machine .receiving} {cs : List (List UInt8 × List UInt8)
     intro ext m1 h1 h2 h3 h4 h5 h6 h7
     rw [← h4] at hall hni
     exact next_last h1 hall hni h3 (by simpa [List.append_assoc] using h2) (by rw [h6, h4]; simpa using hfit)
-      (by rw [h5]; exact hs) (by rw [h7]; exact hn)
+      (by rw [h5]; exact hs) (fun hy => by rw [h7]; exact hn hy)
   | cons c cs' =>
     obtain ⟨cl, dd⟩ := c
     obtain ⟨sz, hL, hd, hpos, hll, hmax⟩ := hcs (cl, dd) (by simp)
@@ -613,7 +624,7 @@ theorem next_size {m : Machine .receiving} {cs : List (List UInt8 × List UInt8)
     rw [hρ]
     rw [← h4] at hcs' hl
     exact next_data h1 hd hpos hcs' hl h3 (by simpa [List.append_assoc] using h2)
-      (by rw [h6, h4]; rw [hρ] at hfit; exact hfit) (by rw [h5]; exact hs) (by rw [h7]; exact hn)
+      (by rw [h6, h4]; rw [hρ] at hfit; exact hfit) (by rw [h5]; exact hs) (fun hy => by rw [h7]; exact hn hy)
 
 /-- **One pull, in any body state, with any part of the rest of the body unread.** -/
 theorem next_body {m : Machine .receiving} {ω ρ y rest : List UInt8} (h : InBody m ω ρ y rest) :
@@ -655,7 +666,7 @@ def Req.bytes (R : Req) : List UInt8 := R.rl ++ R.hdr ++ CRLF ++ R.w
 def Req.head (R : Req) (fields : List (Header.Name × Header.Value)) : Request.Head :=
   { method := R.M, version := R.v, uri := R.T, headers := headersOf fields }
 
-/-- The conditions of `request_read` on a request, for a configuration and a header-byte count
+/-- The conditions of `request_read` on a request, except the one on Expect, for a configuration and a header-byte count
 `h0` at the start. -/
 structure ReqOk (cfg : Protocol.H1.Config) (h0 : Nat) (R : Req) : Prop where
   line : HttpSpec.Strict.RequestLineFits (rlim cfg) R.rl R.mb R.tb R.major R.minor
@@ -670,7 +681,6 @@ structure ReqOk (cfg : Protocol.H1.Config) (h0 : Nat) (R : Req) : Prop where
   suits : TargetSuits R.M R.T
   host : ∀ hs, LineVals R.lines "host" hs → (R.v = .v11 ∨ hs ≠ []) →
     ∃ x, hs = [x] ∧ ∀ V : Header.Value, ascii V.value = x → HostAccepted R.T V = true
-  exp : R.v = .v10 ∨ LineVals R.lines "expect" []
   hte : LineVals R.lines "transfer-encoding" R.te
   hcl : LineVals R.lines "content-length" R.cl
   assigns : Assigns (R.v == .v10) R.te R.cl R.body
@@ -698,9 +708,10 @@ theorem checked {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} (hR : ReqOk cfg 
     (hcfg : M0.config = cfg) {fields : List (Header.Name × Header.Value)}
     (hmh : M0.reader.messageHead = R.head fields) (hf : Pairwise2 RecordedLine fields R.lines)
     (hbb : M0.reader.bodyBytesRead = 0) (hs : M0.writer.sentMessage = false) (hib : InBounds M0)
-    (hnm : M0.reader.noMoreInput = false) {y rest : List UInt8} (hu : unread M0.reader.input ++ y = R.w ++ rest) :
+    {y rest : List UInt8} (hnm : y ≠ [] → M0.reader.noMoreInput = false)
+    (hu : unread M0.reader.input ++ y = R.w ++ rest) :
     (Machine.processHeaders M0).processRead = Machine.processHeaders M0 ∧
-      InBody (Machine.processHeaders M0) R.w R.d y rest ∧
+      (InBody (Machine.processHeaders M0) R.w R.d y rest ∨ InWait (Machine.processHeaders M0) R.w R.d y rest) ∧
       (Machine.processHeaders M0).reader.messageHead = R.head fields ∧
       (Machine.processHeaders M0).config = cfg ∧
       (Machine.processHeaders M0).writer = { M0.writer with state := .waitingHeaders } ∧
@@ -734,26 +745,36 @@ theorem checked {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} (hR : ReqOk cfg 
     exact host_ok hhd hf hhs hx
   rw [← hmh] at hck hgs
   obtain ⟨hr, hcfg', hsent, hw⟩ := processHeaders_ok M0 (by rw [hmh]; exact target_ok hR.suits) hck hgs hmax
-  have hnx : Machine.hasExpectContinue (dir := .receiving) (R.head fields) = false := noExpect hhd hf hR.exp
-  have hst1 : (Machine.processHeaders M0).reader.state = .readBody (initBody b) := by
-    rw [hr]; show afterHead M0.reader.messageHead b = _; rw [hmh]; simp [afterHead, hnx]
   have hcons : Cons M0 (Machine.processHeaders M0) := cons_input hib (by rw [hr])
-  refine ⟨processRead_body hst1 (hsent.trans hs), ⟨_, hst1, by rw [hcfg']; exact hrest, ?_, hcons.1, ?_,
-    hsent.trans hs, by rw [hr]; exact hnm⟩, by rw [hr]; exact hmh, hcfg', hw, hcons⟩
-  · show unread (Machine.processHeaders M0).reader.input ++ y = _; rw [hr]; exact hu
-  · show (Machine.processHeaders M0).reader.bodyBytesRead + _ ≤ _; rw [hr, hcfg']; simp only; omega
+  have hu1 : unread (Machine.processHeaders M0).reader.input ++ y = R.w ++ rest := by
+    show unread (Machine.processHeaders M0).reader.input ++ y = _; rw [hr]; exact hu
+  have hb1 : (Machine.processHeaders M0).reader.bodyBytesRead + R.d.length ≤
+      (Machine.processHeaders M0).config.maxBodySize := by
+    show (Machine.processHeaders M0).reader.bodyBytesRead + _ ≤ _; rw [hr, hcfg']; simp only; omega
+  have hn1 : y ≠ [] → (Machine.processHeaders M0).reader.noMoreInput = false := fun hy => by
+    rw [hr]; exact hnm hy
+  have hrest' : BodyRest (Machine.processHeaders M0).config (initBody b) R.w R.d := by rw [hcfg']; exact hrest
+  by_cases hx : Machine.hasExpectContinue (dir := .receiving) (R.head fields) = true
+  · have hst1 : (Machine.processHeaders M0).reader.state = .continue (.readBody (initBody b)) := by
+      rw [hr]; show afterHead M0.reader.messageHead b = _; rw [hmh]; simp [afterHead, hx]
+    exact ⟨(processRead_cases _).2.2.2.2.2.1 _ hst1, Or.inr ⟨_, hst1, hrest', hu1, hcons.1, hb1,
+      hsent.trans hs, hn1⟩, by rw [hr]; exact hmh, hcfg', hw, hcons⟩
+  · have hst1 : (Machine.processHeaders M0).reader.state = .readBody (initBody b) := by
+      rw [hr]; show afterHead M0.reader.messageHead b = _; rw [hmh]; simp [afterHead, hx]
+    exact ⟨processRead_body hst1 (hsent.trans hs), Or.inl ⟨_, hst1, hrest', hu1, hcons.1, hb1,
+      hsent.trans hs, hn1⟩, by rw [hr]; exact hmh, hcfg', hw, hcons⟩
 
 /-! ## The head, read in pieces -/
 
 /-- What holds throughout the head. -/
-def Base (cfg : Protocol.H1.Config) (m : Machine .receiving) : Prop :=
+def Base (cfg : Protocol.H1.Config) (m : Machine .receiving) (y : List UInt8) : Prop :=
   m.config = cfg ∧ InBounds m ∧ m.writer.sentMessage = false ∧ m.writer.userClosedBody = false ∧
-    m.writer.state = .pending ∧ m.reader.noMoreInput = false ∧ m.reader.bodyBytesRead = 0
+    m.writer.state = .pending ∧ (y ≠ [] → m.reader.noMoreInput = false) ∧ m.reader.bodyBytesRead = 0
 
 /-- The machine is reading the head of `R`, followed by `rest`; `y` are the bytes still to arrive. -/
 def HdrAt (cfg : Protocol.H1.Config) (h0 : Nat) (R : Req) (rest : List UInt8) (m : Machine .receiving)
     (y : List UInt8) : Prop :=
-  Base cfg m ∧
+  Base cfg m y ∧
   ((m.reader.state = .needStartLine ∧ unread m.reader.input ++ y = R.bytes ++ rest ∧
       m.reader.headerBytesRead = h0) ∨
    ∃ k fields, m.reader.state = .needHeader k ∧ k ≤ R.lines.length ∧
@@ -761,10 +782,11 @@ def HdrAt (cfg : Protocol.H1.Config) (h0 : Nat) (R : Req) (rest : List UInt8) (m
      m.reader.messageHead = R.head fields ∧ Pairwise2 RecordedLine fields (R.lines.take k) ∧
      m.reader.headerBytesRead = h0 + ((R.lines.take k).map (·.1 ++ CRLF)).flatten.length)
 
-/-- The machine has read the head of `R` and is at the start of its body. -/
+/-- The machine has read the head of `R` and is at the start of its body (or waiting to start it,
+for `Expect: 100-continue`). -/
 def BodyStart (cfg : Protocol.H1.Config) (R : Req) (rest : List UInt8) (m : Machine .receiving)
     (y : List UInt8) : Prop :=
-  InBody m R.w R.d y rest ∧ m.config = cfg ∧ m.writer.userClosedBody = false ∧
+  (InBody m R.w R.d y rest ∨ InWait m R.w R.d y rest) ∧ m.config = cfg ∧ m.writer.userClosedBody = false ∧
     m.writer.state = .waitingHeaders ∧
     ∃ fields, Pairwise2 RecordedLine fields R.lines ∧ m.reader.messageHead = R.head fields
 
@@ -808,7 +830,7 @@ theorem hdrAt_addEvent {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} {rest : L
 or reads the whole head and enters the body. -/
 theorem read_hdrs {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} (hR : ReqOk cfg h0 R) {rest y : List UInt8} :
     ∀ (n k : Nat) (fields : List (Header.Name × Header.Value)) (m : Machine .receiving),
-      n + k = R.lines.length → Base cfg m → m.reader.state = .needHeader k →
+      n + k = R.lines.length → Base cfg m y → m.reader.state = .needHeader k →
       unread m.reader.input ++ y = ((R.lines.drop k).map (·.1 ++ CRLF)).flatten ++ CRLF ++ R.w ++ rest →
       m.reader.messageHead = R.head fields → Pairwise2 RecordedLine fields (R.lines.take k) →
       m.reader.headerBytesRead = h0 + ((R.lines.take k).map (·.1 ++ CRLF)).flatten.length →
@@ -840,7 +862,7 @@ theorem read_hdrs {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} (hR : ReqOk cf
         obtain ⟨e, he⟩ := pcu_short (pcu_parseSingleHeader m.config)
           (acc_parseSingleHeader_end m.config (R.w ++ rest)) hib hu
           (by have := congrArg List.length hw; simp only [List.length_append] at this ⊢; omega)
-        rw [hdr_wait hst hnm he]
+        rw [hdr_wait hst (hnm (by rw [hy]; simp [ha0])) he]
         refine Or.inl ⟨⟨⟨rfl, hib, hs, huc, hws, hnm, hbb⟩, Or.inr ⟨k, fields, hst, by omega, ?_, hmh,
           by rw [ht]; exact hf, hhb⟩⟩, by rw [hy]; simp [ha0]⟩
         show unread m.reader.input ++ y = _
@@ -890,7 +912,7 @@ theorem read_hdrs {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} (hR : ReqOk cf
           ((L'.map (·.1 ++ CRLF)).flatten ++ (CRLF ++ (R.w ++ rest)))
         obtain ⟨e, he⟩ := pcu_short (pcu_parseSingleHeader m.config) hacc hib (by rw [hu]; simp)
           (by have := congrArg List.length hw; simp only [List.length_append] at this ⊢; omega)
-        rw [hdr_wait hst hnm he]
+        rw [hdr_wait hst (hnm (by rw [hy]; simp [ha0])) he]
         refine Or.inl ⟨⟨⟨rfl, hib, hs, huc, hws, hnm, hbb⟩, Or.inr ⟨k, fields, hst, by omega, ?_, hmh, hf, hhb⟩⟩,
           by rw [hy]; simp [ha0]⟩
         show unread m.reader.input ++ y = _
@@ -905,9 +927,10 @@ theorem read_head {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} (hR : ReqOk cf
   obtain ⟨hB, ⟨hst, hu, hhb⟩ | ⟨k, fields, hst, hk, hu, hmh, hf, hhb⟩⟩ := h
   · obtain ⟨hcfg, hib, hs, huc, hws, hnm, hbb⟩ := hB
     subst hcfg
-    have hwait : ∀ e, parseRequestLineRawVersion m.config m.reader.input = .error e .eof →
+    have hwait : ∀ e, m.reader.noMoreInput = false →
+        parseRequestLineRawVersion m.config m.reader.input = .error e .eof →
         m.processRead = m.addEvent (.needMoreData none) := by
-      intro e he
+      intro e hnm he
       by_cases hae : m.reader.input.atEnd = true
       · rw [(processRead_cases m).1 hst]
         unfold Machine.processNeedStartLine
@@ -937,7 +960,7 @@ theorem read_head {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} (hR : ReqOk cf
       · have ha0' : a'.length ≠ 0 := by simpa using ha0
         obtain ⟨e, he⟩ := pcu_short (pcu_parseRequestLineRawVersion m.config) (hacc _) hib hu2
           (by have := congrArg List.length hw; simp only [List.length_append] at this ⊢; omega)
-        rw [hwait e he]
+        rw [hwait e (hnm (by rw [hy]; simp [ha0])) he]
         exact Or.inl ⟨⟨⟨rfl, hib, hs, huc, hws, hnm, hbb⟩, Or.inl ⟨hst, hu, hhb⟩⟩, by rw [hy]; simp [ha0]⟩
     · exact hcover c' hc hcy.symm
   · exact read_hdrs hR (R.lines.length - k) k fields m (by omega) hB hst hu hmh hf hhb
@@ -951,12 +974,19 @@ def DoneAt (cfg : Protocol.H1.Config) (R : Req) (rest : List UInt8) (m : Machine
     m.writer.state = .waitingHeaders ∧
     (∃ fields, Pairwise2 RecordedLine fields R.lines ∧ m.reader.messageHead = R.head fields) ∧
     ((m.reader.state = .complete ∧ unread m.reader.input ++ y = rest ∧ InBounds m ∧
-      m.reader.noMoreInput = false) ∨ m.reader.state = .closed)
+      (y ≠ [] → m.reader.noMoreInput = false)) ∨ m.reader.state = .closed)
 
 /-- In the body: the rest is `ω`, carrying `ρ`. -/
 def BodyAt (cfg : Protocol.H1.Config) (R : Req) (rest : List UInt8) (m : Machine .receiving) (ω ρ y : List UInt8) :
     Prop :=
   InBody m ω ρ y rest ∧ m.config = cfg ∧ m.writer.userClosedBody = false ∧ m.writer.state = .waitingHeaders ∧
+    ∃ fields, Pairwise2 RecordedLine fields R.lines ∧ m.reader.messageHead = R.head fields
+
+/-- Waiting for the application's answer to `Expect: 100-continue`, with all of the body to read. -/
+def WaitAt (cfg : Protocol.H1.Config) (R : Req) (rest : List UInt8) (m : Machine .receiving) (y : List UInt8) :
+    Prop :=
+  InWait m R.w R.d y rest ∧ m.config = cfg ∧ m.writer.userClosedBody = false ∧
+    m.writer.state = .waitingHeaders ∧
     ∃ fields, Pairwise2 RecordedLine fields R.lines ∧ m.reader.messageHead = R.head fields
 
 /-- The data of pulled chunks. -/
@@ -967,12 +997,18 @@ def Final (cs : List PulledChunk) (d : List UInt8) : Prop :=
   ∃ qs fin, cs = qs ++ [fin] ∧ (∀ q ∈ qs, q.final = false) ∧ fin.final = true ∧ dataOf qs ++
     fin.chunk.data.data.toList = d
 
-/-- Where the machine is in reading `R`, with `y` still to arrive and `cs` pulled so far. -/
+/-- Where the machine is in reading `R`, with `y` still to arrive and `cs` pulled so far: in the
+head, waiting for `canContinue`, in the body, or done. -/
 def Phase (cfg : Protocol.H1.Config) (h0 : Nat) (R : Req) (rest : List UInt8) (m : Machine .receiving)
     (y : List UInt8) (cs : List PulledChunk) : Prop :=
   (HdrAt cfg h0 R rest m y ∧ cs = []) ∨
+  (WaitAt cfg R rest m y ∧ cs = []) ∨
   (∃ ω ρ, BodyAt cfg R rest m ω ρ y ∧ dataOf cs ++ ρ = R.d ∧ ∀ c ∈ cs, c.final = false) ∨
   (DoneAt cfg R rest m y ∧ Final cs R.d)
+
+theorem phase_config {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} {rest : List UInt8} {m : Machine .receiving}
+    {y : List UInt8} {cs : List PulledChunk} (h : Phase cfg h0 R rest m y cs) : m.config = cfg := by
+  rcases h with ⟨⟨⟨hc, -⟩, -⟩, -⟩ | ⟨⟨-, hc, -⟩, -⟩ | ⟨-, -, ⟨-, hc, -⟩, -⟩ | ⟨⟨hc, -⟩, -⟩ <;> exact hc
 
 /-- The machine after a step's read and write passes, with events and output taken. -/
 def clean (m : Machine .receiving) : Machine .receiving :=
@@ -982,10 +1018,6 @@ theorem step_clean {m : Machine .receiving} (h : m.processRead.processWrite = m.
     m.step.1 = clean m.processRead := by
   simp only [Machine.step, Machine.takeEvents, Machine.takeOutput, h]; rfl
 
-theorem phase_clean {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} {rest : List UInt8} {m : Machine .receiving}
-    {y : List UInt8} {cs : List PulledChunk} (h : Phase cfg h0 R rest m y cs) :
-    Phase cfg h0 R rest (clean m) y cs := h
-
 theorem processWrite_pending {m : Machine .receiving} (hw : m.writer.state = .pending)
     (hc : m.reader.isClosed = false) : m.processWrite = m := by
   rw [(processWrite_cases m).2.2.2.2.2.2.1 hw, hc]; rfl
@@ -994,43 +1026,52 @@ theorem processWrite_waiting {m : Machine .receiving} (hw : m.writer.state = .wa
     (hu : m.writer.userClosedBody = false) : m.processWrite = m := by
   rw [(processWrite_cases m).2.2.2.2.2.2.2 hw, hu]; simp
 
+theorem hdr_state {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} {rest : List UInt8} {m : Machine .receiving}
+    {y : List UInt8} (h : HdrAt cfg h0 R rest m y) :
+    m.reader.state = .needStartLine ∨ ∃ k, m.reader.state = .needHeader k := by
+  obtain ⟨-, ⟨hst, -⟩ | ⟨k, -, hst, -⟩⟩ := h
+  · exact Or.inl hst
+  · exact Or.inr ⟨k, hst⟩
+
 theorem isClosed_hdr {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} {rest : List UInt8} {m : Machine .receiving}
     {y : List UInt8} (h : HdrAt cfg h0 R rest m y) : m.reader.isClosed = false := by
-  obtain ⟨-, ⟨hst, -⟩ | ⟨k, -, hst, -⟩⟩ := h <;> simp [Reader.isClosed, hst]
+  rcases hdr_state h with hst | ⟨k, hst⟩ <;> simp [Reader.isClosed, hst]
 
-/-- **A step**: the machine stays in its phase or moves on; it only consumes input; and with no
-bytes still to arrive, a step does not leave the machine in the head. -/
+/-- **A step**: the machine stays in its phase or moves on; with no bytes still to arrive, a step
+does not leave the machine in the head. -/
 theorem phase_step {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} (hR : ReqOk cfg h0 R) {rest y : List UInt8}
     {m : Machine .receiving} {cs : List PulledChunk} (h : Phase cfg h0 R rest m y cs) :
-    Phase cfg h0 R rest m.step.1 y cs ∧ (∃ z, unread m.reader.input = z ++ unread m.step.1.reader.input) ∧
-      (y = [] → ¬ HdrAt cfg h0 R rest m.step.1 y) := by
-  rcases h with ⟨hh, rfl⟩ | ⟨ω, ρ, hb, hd, hf⟩ | ⟨hd, hfin⟩
-  · have hB := hh.1
-    have hcons : Cons m m.processRead := (absorb_processRead m hB.2.1 hB.2.2.2.2.2.1 hB.2.2.1).1
-    rcases read_head hR hh with ⟨hh', hy⟩ | hbs
+    Phase cfg h0 R rest m.step.1 y cs ∧ (y = [] → ¬ HdrAt cfg h0 R rest m.step.1 y) := by
+  have notH : ∀ m' s, m'.reader.state = s → (s ≠ .needStartLine ∧ ∀ k, s ≠ .needHeader k) →
+      ¬ HdrAt cfg h0 R rest m' y := by
+    intro m' s hs hn hh
+    rcases hdr_state hh with e | ⟨k, e⟩
+    · exact hn.1 (hs ▸ e)
+    · exact hn.2 k (hs ▸ e)
+  rcases h with ⟨hh, rfl⟩ | ⟨hw, rfl⟩ | ⟨ω, ρ, hb, hd, hf⟩ | ⟨hd, hfin⟩
+  · rcases read_head hR hh with ⟨hh', hy⟩ | ⟨hin, hc, huc, hws, hmh⟩
     · rw [step_clean (processWrite_pending hh'.1.2.2.2.2.1 (isClosed_hdr hh'))]
-      exact ⟨Or.inl ⟨hh', rfl⟩, hcons.2, fun h0 => absurd h0 hy⟩
-    · obtain ⟨hin, hc, huc, hws, hmh⟩ := hbs
-      rw [step_clean (processWrite_waiting hws huc)]
-      refine ⟨Or.inr (Or.inl ⟨R.w, R.d, ⟨hin, hc, huc, hws, hmh⟩, by simp [dataOf], by simp⟩), hcons.2, ?_⟩
-      intro _ hh2
-      obtain ⟨bs, hbs, -⟩ := hin
-      obtain ⟨-, ⟨hst, -⟩ | ⟨k, -, hst, -⟩⟩ := hh2 <;>
-        (have : (clean m.processRead).reader.state = m.processRead.reader.state := rfl
-         rw [this, hbs] at hst; cases hst)
+      exact ⟨Or.inl ⟨hh', rfl⟩, fun h0 => absurd h0 hy⟩
+    · rw [step_clean (processWrite_waiting hws huc)]
+      rcases hin with hin | hin
+      · refine ⟨Or.inr (Or.inr (Or.inl ⟨R.w, R.d, ⟨hin, hc, huc, hws, hmh⟩, by simp [dataOf], by simp⟩)),
+          fun _ => ?_⟩
+        obtain ⟨bs, hbs, -⟩ := hin
+        exact notH _ _ (show (clean m.processRead).reader.state = _ from hbs) ⟨by simp, by simp⟩
+      · refine ⟨Or.inr (Or.inl ⟨⟨hin, hc, huc, hws, hmh⟩, rfl⟩), fun _ => ?_⟩
+        obtain ⟨bs, hbs, -⟩ := hin
+        exact notH _ _ (show (clean m.processRead).reader.state = _ from hbs) ⟨by simp, by simp⟩
+  · obtain ⟨⟨bs, hbs, hrest, hu, hib, hfit, hs, hn⟩, hc, huc, hws, hmh⟩ := hw
+    have hr : m.processRead = m := (processRead_cases m).2.2.2.2.2.1 _ hbs
+    rw [step_clean (by rw [hr]; exact processWrite_waiting hws huc), hr]
+    exact ⟨Or.inr (Or.inl ⟨⟨⟨bs, hbs, hrest, hu, hib, hfit, hs, hn⟩, hc, huc, hws, hmh⟩, rfl⟩),
+      fun _ => notH _ _ (show (clean m).reader.state = _ from hbs) ⟨by simp, by simp⟩⟩
   · obtain ⟨⟨bs, hbs, hrest, hu, hib, hfit, hs, hn⟩, hc, huc, hws, hmh⟩ := hb
     have hr : m.processRead = m := processRead_body hbs hs
     rw [step_clean (by rw [hr]; exact processWrite_waiting hws huc), hr]
-    refine ⟨Or.inr (Or.inl ⟨ω, ρ, ⟨⟨bs, hbs, hrest, hu, hib, hfit, hs, hn⟩, hc, huc, hws, hmh⟩, hd, hf⟩),
-      ⟨[], rfl⟩, ?_⟩
-    intro _ hh2
-    obtain ⟨-, ⟨hst, -⟩ | ⟨k, -, hst, -⟩⟩ := hh2 <;>
-      (have : (clean m).reader.state = m.reader.state := rfl
-       rw [this, hbs] at hst; cases hst)
+    exact ⟨Or.inr (Or.inr (Or.inl ⟨ω, ρ, ⟨⟨bs, hbs, hrest, hu, hib, hfit, hs, hn⟩, hc, huc, hws, hmh⟩, hd, hf⟩)),
+      fun _ => notH _ _ (show (clean m).reader.state = _ from hbs) ⟨by simp, by simp⟩⟩
   · obtain ⟨hc, hs, huc, hws, hmh, hst⟩ := hd
-    have hnotH : ∀ m', (m'.reader.state = .complete ∨ m'.reader.state = .closed) → ¬ HdrAt cfg h0 R rest m' y := by
-      intro m' hs' hh2
-      obtain ⟨-, ⟨hst2, -⟩ | ⟨k, -, hst2, -⟩⟩ := hh2 <;> rcases hs' with e | e <;> rw [e] at hst2 <;> cases hst2
     rcases hst with ⟨hcpl, hu, hib, hn⟩ | hcl
     · have hr := (processRead_cases m).2.2.2.1 hcpl
       unfold Machine.processReaderCompleteState at hr
@@ -1039,16 +1080,16 @@ theorem phase_step {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} (hR : ReqOk c
         have hw : (m.setReaderState .closed).processWrite = m.setReaderState .closed :=
           processWrite_waiting hws huc
         rw [step_clean (by rw [hr]; exact hw), hr]
-        exact ⟨Or.inr (Or.inr ⟨⟨hc, hs, huc, hws, hmh, Or.inr rfl⟩, hfin⟩), ⟨[], rfl⟩,
-          fun _ => hnotH _ (Or.inr rfl)⟩
+        exact ⟨Or.inr (Or.inr (Or.inr ⟨⟨hc, hs, huc, hws, hmh, Or.inr rfl⟩, hfin⟩)),
+          fun _ => notH _ .closed rfl ⟨by simp, by simp⟩⟩
       · simp only [hx, ↓reduceIte] at hr
         rw [step_clean (by rw [hr]; exact processWrite_waiting hws huc), hr]
-        exact ⟨Or.inr (Or.inr ⟨⟨hc, hs, huc, hws, hmh, Or.inl ⟨hcpl, hu, hib, hn⟩⟩, hfin⟩),
-          ⟨[], rfl⟩, fun _ => hnotH _ (Or.inl hcpl)⟩
+        exact ⟨Or.inr (Or.inr (Or.inr ⟨⟨hc, hs, huc, hws, hmh, Or.inl ⟨hcpl, hu, hib, hn⟩⟩, hfin⟩)),
+          fun _ => notH _ _ (show (clean m).reader.state = _ from hcpl) ⟨by simp, by simp⟩⟩
     · have hr := (processRead_cases m).2.2.2.2.2.2.1 hcl
       rw [step_clean (by rw [hr]; exact processWrite_waiting hws huc), hr]
-      exact ⟨Or.inr (Or.inr ⟨⟨hc, hs, huc, hws, hmh, Or.inr hcl⟩, hfin⟩), ⟨[], rfl⟩,
-        fun _ => hnotH _ (Or.inr hcl)⟩
+      exact ⟨Or.inr (Or.inr (Or.inr ⟨⟨hc, hs, huc, hws, hmh, Or.inr hcl⟩, hfin⟩)),
+        fun _ => notH _ _ (show (clean m).reader.state = _ from hcl) ⟨by simp, by simp⟩⟩
 
 theorem pullBody_eq (m : Machine .receiving) :
     ∃ b, m.pullBody = ({ m.pullNextChunk.1 with pullBodyStalled := b }, m.pullNextChunk.2) := by
@@ -1060,54 +1101,57 @@ theorem pull_none_of {m : Machine .receiving} (h : ∀ bs, m.reader.state ≠ .r
   rw [pull_other h] at hb
   exact ⟨b, hb⟩
 
-/-- **A pull**: the machine stays in its phase or moves on, the chunks pulled so far still deliver a
-prefix of the body's data (all of it, the last marked final, once the body is read), and it only
-consumes input. -/
+/-- **A pull**: the machine stays in its phase or moves on, and the chunks pulled so far still
+deliver a prefix of the body's data (all of it, the last marked final, once the body is read). -/
 theorem phase_pull {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} {rest y : List UInt8}
     {m : Machine .receiving} {cs : List PulledChunk} (h : Phase cfg h0 R rest m y cs) :
-    Phase cfg h0 R rest m.pullBody.1 y (cs ++ m.pullBody.2.toList) ∧
-      (∃ z, unread m.reader.input = z ++ unread m.pullBody.1.reader.input) := by
-  rcases h with ⟨hh, rfl⟩ | ⟨ω, ρ, hb, hd, hf⟩ | ⟨hd, hfin⟩
+    Phase cfg h0 R rest m.pullBody.1 y (cs ++ m.pullBody.2.toList) := by
+  rcases h with ⟨hh, rfl⟩ | ⟨hw, rfl⟩ | ⟨ω, ρ, hb, hd, hf⟩ | ⟨hd, hfin⟩
   · have hnb : ∀ bs, m.reader.state ≠ .readBody bs := by
       intro bs e
-      obtain ⟨-, ⟨hst, -⟩ | ⟨k, -, hst, -⟩⟩ := hh <;> rw [e] at hst <;> cases hst
+      rcases hdr_state hh with h1 | ⟨k, h1⟩ <;> rw [e] at h1 <;> cases h1
     obtain ⟨b, hp⟩ := pull_none_of hnb
     rw [hp]
-    exact ⟨Or.inl ⟨hh, rfl⟩, [], rfl⟩
+    exact Or.inl ⟨hh, rfl⟩
+  · have hnb : ∀ bs, m.reader.state ≠ .readBody bs := by
+      intro bs e
+      obtain ⟨⟨bs', h1, -⟩, -⟩ := hw
+      rw [e] at h1; cases h1
+    obtain ⟨b, hp⟩ := pull_none_of hnb
+    rw [hp]
+    exact Or.inr (Or.inl ⟨hw, rfl⟩)
   · obtain ⟨hin, hc, huc, hws, hmh⟩ := hb
     have hpo := next_body hin
-    obtain ⟨-, -, -, -, hib0, -, hs0, hn0⟩ := hin
-    have hcons := pullBody_cons hib0
-    refine ⟨?_, hcons.2⟩
+    obtain ⟨-, -, -, -, -, -, hs0, hn0⟩ := hin
     obtain ⟨b, hp⟩ := pullBody_eq m
     rw [hp]
-    rw [hp] at hcons
-    generalize m.pullNextChunk = r at hpo hcons
+    generalize m.pullNextChunk = r at hpo
     obtain ⟨m1, o⟩ := r
     obtain ⟨⟨k1, k2, k3, k4⟩, (⟨rfl, -, ω', hin'⟩ | ⟨c, π, ρ', rfl, hcf, -, hρ, hcd, ω', hin'⟩ |
       ⟨c, rfl, hcf, hcd, hst, hu, hib⟩)⟩ := hpo
-    · refine Or.inr (Or.inl ⟨ω', ρ, ⟨hin', by rw [← hc]; exact k1, by rw [k2]; exact huc, by rw [k2]; exact hws,
-        by rw [k3]; exact hmh⟩, by simpa using hd, by simpa using hf⟩)
-    · refine Or.inr (Or.inl ⟨ω', ρ', ⟨hin', by rw [← hc]; exact k1, by rw [k2]; exact huc, by rw [k2]; exact hws,
-        by rw [k3]; exact hmh⟩, ?_, ?_⟩)
+    · refine Or.inr (Or.inr (Or.inl ⟨ω', ρ, ⟨hin', by rw [← hc]; exact k1, by rw [k2]; exact huc,
+        by rw [k2]; exact hws, by rw [k3]; exact hmh⟩, by simpa using hd, by simpa using hf⟩))
+    · refine Or.inr (Or.inr (Or.inl ⟨ω', ρ', ⟨hin', by rw [← hc]; exact k1, by rw [k2]; exact huc,
+        by rw [k2]; exact hws, by rw [k3]; exact hmh⟩, ?_, ?_⟩))
       · rw [← hd, hρ]; simp [dataOf, hcd]
       · intro c' hc'
         simp only [Option.toList_some, List.mem_append, List.mem_singleton] at hc'
         rcases hc' with hc' | rfl
         · exact hf c' hc'
         · exact hcf
-    · refine Or.inr (Or.inr ⟨⟨by rw [← hc]; exact k1, by rw [k2]; exact hs0, by rw [k2]; exact huc,
+    · refine Or.inr (Or.inr (Or.inr ⟨⟨by rw [← hc]; exact k1, by rw [k2]; exact hs0, by rw [k2]; exact huc,
         by rw [k2]; exact hws, by rw [k3]; exact hmh, Or.inl ⟨hst, hu, hib, ?_⟩⟩,
-        cs, c, by simp, hf, hcf, by rw [hcd]; exact hd⟩)
+        cs, c, by simp, hf, hcf, by rw [hcd]; exact hd⟩))
+      intro hy
       show m1.reader.noMoreInput = false
-      rw [k4]; exact hn0
+      rw [k4]; exact hn0 hy
   · obtain ⟨hc, hs, huc, hws, hmh, hst⟩ := hd
     have hnb : ∀ bs, m.reader.state ≠ .readBody bs := by
       intro bs e
       rcases hst with ⟨e2, -⟩ | e2 <;> rw [e] at e2 <;> cases e2
     obtain ⟨b, hp⟩ := pull_none_of hnb
     rw [hp]
-    exact ⟨Or.inr (Or.inr ⟨⟨hc, hs, huc, hws, hmh, hst⟩, by simpa using hfin⟩), [], rfl⟩
+    exact Or.inr (Or.inr (Or.inr ⟨⟨hc, hs, huc, hws, hmh, hst⟩, by simpa using hfin⟩))
 
 theorem feed_closed {m : Machine .receiving} (h : m.reader.state = .closed) (d : _root_.ByteArray) :
     m.feed d = m := by
@@ -1115,64 +1159,137 @@ theorem feed_closed {m : Machine .receiving} (h : m.reader.state = .closed) (d :
   have : m.isReaderClosed = true := by simp [Machine.isReaderClosed, h]
   simp [this]
 
-/-- **A read**: feeding the next bytes keeps the machine in its phase. -/
+/-- **A read**: feeding the next bytes, when they fit the buffer, keeps the machine in its phase. -/
 theorem phase_feed {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} {rest y : List UInt8}
     {m : Machine .receiving} {cs : List PulledChunk} (D : _root_.ByteArray)
     (h : Phase cfg h0 R rest m (D.data.toList ++ y) cs)
-    (hbuf : (unread m.reader.input ++ D.data.toList ++ y).length ≤ Machine.maxBufferedInputBytes cfg) :
-    Phase cfg h0 R rest (m.feed D) y cs ∧
-      (unread (m.feed D).reader.input ++ y).length ≤ (unread m.reader.input ++ D.data.toList ++ y).length := by
+    (hbuf : m.reader.state ≠ .closed →
+      (unread m.reader.input).length + D.size ≤ Machine.maxBufferedInputBytes cfg) :
+    Phase cfg h0 R rest (m.feed D) y cs := by
   have live : ∀ (hd : ¬ Dead m) (hib : InBounds m) (hc : m.config = cfg),
       m.feed D = { m with reader := m.reader.feed D, pullBodyStalled := false } ∧
         unread (m.feed D).reader.input = unread m.reader.input ++ D.data.toList ∧ InBounds (m.feed D) := by
     intro hd hib hc
     have hb : (unread m.reader.input).length + D.size ≤ Machine.maxBufferedInputBytes m.config := by
-      have := hbuf; rw [hc]
-      simp only [List.length_append] at this
-      have : D.data.toList.length = D.size := by simp
-      omega
+      rw [hc]; exact hbuf (fun e => hd (Or.inl e))
     have e := feed_live hd hib hb
     refine ⟨e, by rw [e]; exact unread_readerFeed m D hib, ?_⟩
     rw [e]; unfold InBounds; show (m.reader.feed D).input.idx ≤ _; rw [idx_readerFeed]; exact Nat.zero_le _
-  have notDead : ∀ bs, (m.reader.state = .readBody bs ∨ m.reader.state = .needStartLine ∨
-      (∃ k, m.reader.state = .needHeader k) ∨ m.reader.state = .complete) → ¬ Dead m := by
-    intro bs hs hd
-    rcases hd with e | ⟨er, e⟩ <;> rcases hs with h1 | h1 | ⟨k, h1⟩ | h1 <;> rw [h1] at e <;> cases e
-  rcases h with ⟨⟨hB, hph⟩, rfl⟩ | ⟨ω, ρ, ⟨⟨bs, hbs, hrest, hu, hib, hfit, hs, hn⟩, hc, huc, hws, hmh⟩, hd, hf⟩ |
+  have notDead : ∀ s, m.reader.state = s → s ≠ .closed → (∀ e, s ≠ .failed e) → ¬ Dead m := by
+    intro s hs h1 h2 hd
+    rcases hd with e | ⟨er, e⟩
+    · exact h1 (hs ▸ e)
+    · exact h2 er (hs ▸ e)
+  rcases h with ⟨⟨hB, hph⟩, rfl⟩ | ⟨⟨⟨bs, hbs, hrest, hu, hib, hfit, hs, hn⟩, hc, huc, hws, hmh⟩, rfl⟩ |
+    ⟨ω, ρ, ⟨⟨bs, hbs, hrest, hu, hib, hfit, hs, hn⟩, hc, huc, hws, hmh⟩, hd, hf⟩ |
     ⟨⟨hc, hs, huc, hws, hmh, hst⟩, hfin⟩
   · obtain ⟨hc, hib, hs, huc, hws, hn, hbb⟩ := hB
     have hnd : ¬ Dead m := by
       rcases hph with ⟨hst, -⟩ | ⟨k, -, hst, -⟩
-      · exact notDead .chunkedSize (Or.inr (Or.inl hst))
-      · exact notDead .chunkedSize (Or.inr (Or.inr (Or.inl ⟨k, hst⟩)))
+      · exact notDead _ hst (by simp) (by simp)
+      · exact notDead _ hst (by simp) (by simp)
     obtain ⟨e, hu', hib'⟩ := live hnd hib hc
-    refine ⟨Or.inl ⟨⟨⟨by rw [e]; exact hc, hib', by rw [e]; exact hs, by rw [e]; exact huc, by rw [e]; exact hws,
-      by rw [e]; exact hn, by rw [e]; exact hbb⟩, ?_⟩, rfl⟩, by rw [hu']; simp⟩
+    refine Or.inl ⟨⟨⟨by rw [e]; exact hc, hib', by rw [e]; exact hs, by rw [e]; exact huc, by rw [e]; exact hws,
+      fun hy => by rw [e]; exact hn (ne_nil_append hy), by rw [e]; exact hbb⟩, ?_⟩, rfl⟩
     rcases hph with ⟨hst, hu, hhb⟩ | ⟨k, fields, hst, hk, hu, hmh, hf, hhb⟩
     · exact Or.inl ⟨by rw [e]; exact hst, by rw [hu', List.append_assoc]; exact hu, by rw [e]; exact hhb⟩
     · exact Or.inr ⟨k, fields, by rw [e]; exact hst, hk, by rw [hu', List.append_assoc]; exact hu,
         by rw [e]; exact hmh, hf, by rw [e]; exact hhb⟩
-  · obtain ⟨e, hu', hib'⟩ := live (notDead bs (Or.inl hbs)) hib hc
-    refine ⟨Or.inr (Or.inl ⟨ω, ρ, ⟨⟨bs, by rw [e]; exact hbs, by rw [e]; exact hrest,
+  · obtain ⟨e, hu', hib'⟩ := live (notDead _ hbs (by simp) (by simp)) hib hc
+    exact Or.inr (Or.inl ⟨⟨⟨bs, by rw [e]; exact hbs, by rw [e]; exact hrest,
       by rw [hu', List.append_assoc]; exact hu, hib', by rw [e]; exact hfit, by rw [e]; exact hs,
-      by rw [e]; exact hn⟩, by rw [e]; exact hc, by rw [e]; exact huc, by rw [e]; exact hws,
-      by rw [e]; exact hmh⟩, hd, hf⟩), by rw [hu']; simp⟩
+      fun hy => by rw [e]; exact hn (ne_nil_append hy)⟩, by rw [e]; exact hc, by rw [e]; exact huc,
+      by rw [e]; exact hws, by rw [e]; exact hmh⟩, rfl⟩)
+  · obtain ⟨e, hu', hib'⟩ := live (notDead _ hbs (by simp) (by simp)) hib hc
+    exact Or.inr (Or.inr (Or.inl ⟨ω, ρ, ⟨⟨bs, by rw [e]; exact hbs, by rw [e]; exact hrest,
+      by rw [hu', List.append_assoc]; exact hu, hib', by rw [e]; exact hfit, by rw [e]; exact hs,
+      fun hy => by rw [e]; exact hn (ne_nil_append hy)⟩, by rw [e]; exact hc, by rw [e]; exact huc,
+      by rw [e]; exact hws, by rw [e]; exact hmh⟩, hd, hf⟩))
   · rcases hst with ⟨hcpl, hu, hib, hn⟩ | hcl
-    · obtain ⟨e, hu', hib'⟩ := live (notDead .chunkedSize (Or.inr (Or.inr (Or.inr hcpl)))) hib hc
-      exact ⟨Or.inr (Or.inr ⟨⟨by rw [e]; exact hc, by rw [e]; exact hs, by rw [e]; exact huc, by rw [e]; exact hws,
-        by rw [e]; exact hmh, Or.inl ⟨by rw [e]; exact hcpl, by rw [hu', List.append_assoc]; exact hu, hib',
-        by rw [e]; exact hn⟩⟩, hfin⟩), by rw [hu']; simp⟩
+    · obtain ⟨e, hu', hib'⟩ := live (notDead _ hcpl (by simp) (by simp)) hib hc
+      exact Or.inr (Or.inr (Or.inr ⟨⟨by rw [e]; exact hc, by rw [e]; exact hs, by rw [e]; exact huc,
+        by rw [e]; exact hws, by rw [e]; exact hmh, Or.inl ⟨by rw [e]; exact hcpl,
+        by rw [hu', List.append_assoc]; exact hu, hib', fun hy => by rw [e]; exact hn (ne_nil_append hy)⟩⟩,
+        hfin⟩))
     · rw [feed_closed hcl]
-      exact ⟨Or.inr (Or.inr ⟨⟨hc, hs, huc, hws, hmh, Or.inr hcl⟩, hfin⟩), by simp⟩
+      exact Or.inr (Or.inr (Or.inr ⟨⟨hc, hs, huc, hws, hmh, Or.inr hcl⟩, hfin⟩))
+
+/-- A read that does not fit the buffer: the machine rejects the input (`413`). -/
+theorem feed_overflow {m : Machine .receiving} (D : _root_.ByteArray) (hd : ¬ Dead m) (hib : InBounds m)
+    (h : (unread m.reader.input).length + D.size > Machine.maxBufferedInputBytes m.config) :
+    (m.feed D).reader.state = .failed .entityTooLarge := by
+  have hc : ¬ (m.isReaderClosed = true ∨ m.failed = true) := by
+    intro hx
+    rcases hx with hx | hx
+    · unfold Machine.isReaderClosed at hx; split at hx
+      · next hs => exact hd (Or.inl hs)
+      · cases hx
+    · unfold Machine.failed at hx; split at hx
+      · next e hs => exact hd (Or.inr ⟨e, hs⟩)
+      · cases hx
+  unfold Machine.feed
+  rw [if_neg hc]
+  have hr := remaining_readerFeed m D hib
+  simp only
+  rw [if_pos (by rw [hr]; exact h)]
+  simp [Machine.setFailure, Machine.setReaderState, Machine.modifyReader, Machine.addEvent, Machine.setError]
+
+theorem canContinue_other {m : Machine .receiving} (h : ∀ s, m.reader.state ≠ .continue s) (st : Status) :
+    m.canContinue st = m := by
+  unfold Machine.canContinue
+  cases hst : m.reader.state with
+  | «continue» s => exact absurd hst (h s)
+  | _ => rfl
+
+/-- `canContinue .continue` while waiting: the reader goes on to the body. -/
+theorem wait_cont {cfg : Protocol.H1.Config} {R : Req} {rest y : List UInt8} {m : Machine .receiving}
+    (h : WaitAt cfg R rest m y) : BodyAt cfg R rest (m.canContinue .continue) R.w R.d y := by
+  obtain ⟨⟨bs, hbs, hrest, hu, hib, hfit, hs, hn⟩, hc, huc, hws, hmh⟩ := h
+  have hcc : (Status.continue == Status.continue) = true := by decide
+  have e : m.canContinue .continue = (m.modifyWriter (fun writer => { writer with
+      outputData := Encode.encode (v := .v11) writer.outputData ({ status := .«continue» } : Response.Head) })).setReaderState
+      (.readBody bs) := by
+    unfold Machine.canContinue
+    simp only [hbs, hcc, ↓reduceIte]
+  rw [e]
+  exact ⟨⟨bs, rfl, hrest, hu, hib, hfit, hs, hn⟩, hc, huc, hws, hmh⟩
+
+/-- **The application's answer to `Expect: 100-continue`**: `canContinue .continue` keeps the
+machine in its phase, moving it from waiting to the body. -/
+theorem phase_cont {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} {rest y : List UInt8}
+    {m : Machine .receiving} {cs : List PulledChunk} (h : Phase cfg h0 R rest m y cs) :
+    Phase cfg h0 R rest (m.canContinue .continue) y cs := by
+  rcases h with ⟨hh, rfl⟩ | ⟨hw, rfl⟩ | ⟨ω, ρ, hb, hd, hf⟩ | ⟨hd, hfin⟩
+  · rw [canContinue_other (by intro s e; rcases hdr_state hh with h1 | ⟨k, h1⟩ <;> rw [e] at h1 <;> cases h1)]
+    exact Or.inl ⟨hh, rfl⟩
+  · exact Or.inr (Or.inr (Or.inl ⟨R.w, R.d, wait_cont hw, by simp [dataOf], by simp⟩))
+  · have hb' := hb
+    obtain ⟨⟨bs, hbs, -⟩, -⟩ := hb'
+    rw [canContinue_other (by intro s e; rw [e] at hbs; cases hbs)]
+    exact Or.inr (Or.inr (Or.inl ⟨ω, ρ, hb, hd, hf⟩))
+  · have hd' := hd
+    obtain ⟨-, -, -, -, -, hst⟩ := hd'
+    rw [canContinue_other (by intro s e; rcases hst with ⟨h1, -⟩ | h1 <;> rw [e] at h1 <;> cases h1)]
+    exact Or.inr (Or.inr (Or.inr ⟨hd, hfin⟩))
+
+/-- **The end of the input**, once all of the bytes have arrived, keeps the machine in its phase. -/
+theorem phase_noMore {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} {rest : List UInt8}
+    {m : Machine .receiving} {cs : List PulledChunk} (h : Phase cfg h0 R rest m [] cs) :
+    Phase cfg h0 R rest m.noMoreInput [] cs := by
+  have nn : ([] : List UInt8) ≠ [] → m.noMoreInput.reader.noMoreInput = false := fun h => absurd rfl h
+  rcases h with ⟨⟨⟨hc, hib, hs, huc, hws, -, hbb⟩, hph⟩, rfl⟩ |
+    ⟨⟨⟨bs, hbs, hrest, hu, hib, hfit, hs, -⟩, hc, huc, hws, hmh⟩, rfl⟩ |
+    ⟨ω, ρ, ⟨⟨bs, hbs, hrest, hu, hib, hfit, hs, -⟩, hc, huc, hws, hmh⟩, hd, hf⟩ |
+    ⟨⟨hc, hs, huc, hws, hmh, hst⟩, hfin⟩
+  · exact Or.inl ⟨⟨⟨hc, hib, hs, huc, hws, nn, hbb⟩, hph⟩, rfl⟩
+  · exact Or.inr (Or.inl ⟨⟨⟨bs, hbs, hrest, hu, hib, hfit, hs, nn⟩, hc, huc, hws, hmh⟩, rfl⟩)
+  · exact Or.inr (Or.inr (Or.inl ⟨ω, ρ, ⟨⟨bs, hbs, hrest, hu, hib, hfit, hs, nn⟩, hc, huc, hws, hmh⟩, hd, hf⟩))
+  · refine Or.inr (Or.inr (Or.inr ⟨⟨hc, hs, huc, hws, hmh, ?_⟩, hfin⟩))
+    rcases hst with ⟨hcpl, hu, hib, -⟩ | hcl
+    · exact Or.inl ⟨hcpl, hu, hib, nn⟩
+    · exact Or.inr hcl
 
 /-! ## Runs -/
-
-/-- The operations of the server's connection loop on the reading side. -/
-def ServerOp : Op → Prop
-  | .feed _ => True
-  | .step => True
-  | .pullBody => True
-  | _ => False
 
 /-- The bytes the operations feed, in order. -/
 def fedOf : List Op → List UInt8
@@ -1180,39 +1297,55 @@ def fedOf : List Op → List UInt8
   | .feed d :: ops => d.data.toList ++ fedOf ops
   | _ :: ops => fedOf ops
 
+/-- The reading side of the server's connection loop: feeding bytes, steps, body pulls, the
+application's `canContinue .continue`, and the end of the input once no more bytes follow. -/
+def ValidOps : List Op → Prop
+  | [] => True
+  | .feed _ :: ops => ValidOps ops
+  | .step :: ops => ValidOps ops
+  | .pullBody :: ops => ValidOps ops
+  | .canContinue st :: ops => st = .continue ∧ ValidOps ops
+  | .noMoreInput :: ops => fedOf ops = [] ∧ ValidOps ops
+  | _ :: _ => False
+
 /-- Run the operations, collecting the chunks the pulls hand out. -/
 def runP : List Op → Machine .receiving → Machine .receiving × List PulledChunk
   | [], m => (m, [])
   | .pullBody :: ops, m => ((runP ops m.pullBody.1).1, m.pullBody.2.toList ++ (runP ops m.pullBody.1).2)
   | op :: ops, m => runP ops (op.apply m)
 
+/-- No read overflows the buffer: whenever bytes are fed (and the reader is not closed), what is
+then unread fits `maxBufferedInputBytes` — exactly the condition under which `feed` accepts the
+bytes (`feed_overflow`). -/
+def NoOverflow : List Op → Machine .receiving → Prop
+  | [], _ => True
+  | .feed D :: ops, m => (m.reader.state ≠ .closed →
+      (unread m.reader.input).length + D.size ≤ Machine.maxBufferedInputBytes m.config) ∧ NoOverflow ops (m.feed D)
+  | .pullBody :: ops, m => NoOverflow ops m.pullBody.1
+  | op :: ops, m => NoOverflow ops (op.apply m)
+
 theorem run_phase {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} (hR : ReqOk cfg h0 R) {rest : List UInt8} :
-    ∀ (ops : List Op) (m : Machine .receiving) (y : List UInt8) (cs : List PulledChunk),
-      (∀ op ∈ ops, ServerOp op) → Phase cfg h0 R rest m (fedOf ops ++ y) cs →
-      (unread m.reader.input ++ fedOf ops ++ y).length ≤ Machine.maxBufferedInputBytes cfg →
-      Phase cfg h0 R rest (runP ops m).1 y (cs ++ (runP ops m).2) ∧
-        (unread (runP ops m).1.reader.input ++ y).length ≤ Machine.maxBufferedInputBytes cfg
-  | [], m, y, cs, _, h, hb => by simpa [runP, fedOf] using And.intro h hb
-  | op :: ops, m, y, cs, hops, h, hb => by
-    have hops' : ∀ op ∈ ops, ServerOp op := fun o ho => hops o (by simp [ho])
+    ∀ (ops : List Op) (m : Machine .receiving) (cs : List PulledChunk), ValidOps ops → NoOverflow ops m →
+      Phase cfg h0 R rest m (fedOf ops) cs → Phase cfg h0 R rest (runP ops m).1 [] (cs ++ (runP ops m).2)
+  | [], m, cs, _, _, h => by simpa [runP, fedOf] using h
+  | op :: ops, m, cs, hv, hno, h => by
     cases op with
     | feed D =>
-      simp only [fedOf, List.append_assoc] at h hb
-      obtain ⟨h1, h2⟩ := phase_feed D h (by simpa [List.append_assoc] using hb)
-      exact run_phase hR ops (m.feed D) y cs hops' h1 (by simp only [List.append_assoc] at h2 ⊢; omega)
-    | step =>
-      simp only [fedOf] at h hb
-      obtain ⟨h1, ⟨z, hz⟩, -⟩ := phase_step hR h
-      refine run_phase hR ops m.step.1 y cs hops' h1 ?_
-      rw [hz] at hb; simp only [List.length_append] at hb ⊢; omega
+      have hb := hno.1
+      rw [phase_config h] at hb
+      exact run_phase hR ops (m.feed D) cs hv hno.2 (phase_feed D h hb)
+    | step => exact run_phase hR ops m.step.1 cs hv hno (phase_step hR h).1
     | pullBody =>
-      simp only [fedOf] at h hb
-      obtain ⟨h1, ⟨z, hz⟩⟩ := phase_pull h
-      have := run_phase hR ops m.pullBody.1 y _ hops' h1 (by rw [hz] at hb; simp only [List.length_append] at hb ⊢; omega)
+      have := run_phase hR ops m.pullBody.1 _ hv hno (phase_pull h)
       simpa [runP, List.append_assoc] using this
-    | _ =>
-      have := hops _ List.mem_cons_self
-      simp [ServerOp] at this
+    | canContinue st =>
+      obtain ⟨rfl, hv'⟩ := hv
+      exact run_phase hR ops _ cs hv' hno (phase_cont h)
+    | noMoreInput =>
+      obtain ⟨hf, hv'⟩ := hv
+      have h' : Phase cfg h0 R rest m [] cs := by simpa [fedOf, hf] using h
+      exact run_phase hR ops _ cs hv' hno (by rw [hf]; exact phase_noMore h')
+    | _ => exact absurd hv (by simp [ValidOps])
 
 /-- With no bytes still to arrive, pulls read the rest of the body. -/
 theorem finish_pulls {cfg : Protocol.H1.Config} {R : Req} {rest : List UInt8} :
@@ -1254,33 +1387,215 @@ theorem finish_pulls {cfg : Protocol.H1.Config} {R : Req} {rest : List UInt8} :
         exact ⟨cs, c, rfl, hf, hcf, by rw [hcd]; exact hd⟩
       · simp only [List.replicate, runP, hp]
         exact ⟨by rw [← hc]; exact k1, by rw [k2]; exact hs0, by rw [k2]; exact huc, by rw [k2]; exact hws,
-          by rw [k3]; exact hmh, Or.inl ⟨hst, hu, hib, by show m1.reader.noMoreInput = false; rw [k4]; exact hn0⟩⟩
+          by rw [k3]; exact hmh, Or.inl ⟨hst, hu, hib, fun hy => absurd rfl hy⟩⟩
 
 /-- **The machine reads every request within its limits, however it arrives.** Start where a
-request starts (`needStartLine`, nothing sent, nothing counted, the input not ended), with the
-unread bytes and the bytes that the operations `ops` feed together making up the request `R` and
-then anything (`rest`), all within `maxBufferedInputBytes`. `ops` are any sequence of the
-connection loop's reading operations — feeding bytes split in any way, steps, and body pulls, in
-any order. After them, a step and enough pulls complete the body: over the whole run, the pulls
-hand out chunks not marked final and then one marked final, whose data together is the body's data
-`R.d`; the reader is done with the request (complete, or closed if the connection is not kept
-alive) and has recorded its head. `R` must meet the conditions of `request_read` (`ReqOk`). -/
+request starts (`needStartLine`, nothing sent, nothing counted, the input not ended while bytes
+remain), with the unread bytes and the bytes that the operations `ops` feed together making up the
+request `R` and then anything (`rest`). `ops` are any sequence of the connection loop's reading
+operations (`ValidOps`): feeding bytes split in any way, steps, body pulls, the application's
+`canContinue .continue`, and the end of the input after the last byte, in any order, with no read
+overflowing the buffer (`NoOverflow`; a read that overflows is rejected, `feed_overflow`). After
+them, a step, `canContinue .continue` (for a request with `Expect: 100-continue` that the
+application has not answered yet; otherwise it changes nothing) and enough pulls complete the body:
+over the whole run, the pulls hand out chunks not marked final and then one marked final, whose
+data together is the body's data `R.d`; the reader is done with the request (complete, or closed if
+the connection is not kept alive or the input has ended) and has recorded its head. `R` must meet
+the conditions of `request_read` other than the one on Expect (`ReqOk`). -/
 theorem split_read {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} {rest : List UInt8} (hR : ReqOk cfg h0 R)
-    (m : Machine .receiving) (hB : Base cfg m) (hst : m.reader.state = .needStartLine)
-    (hhb : m.reader.headerBytesRead = h0) (ops : List Op) (hops : ∀ op ∈ ops, ServerOp op)
+    (m : Machine .receiving) (ops : List Op) (hB : Base cfg m (fedOf ops)) (hst : m.reader.state = .needStartLine)
+    (hhb : m.reader.headerBytesRead = h0) (hv : ValidOps ops) (hno : NoOverflow ops m)
+    (hu : unread m.reader.input ++ fedOf ops = R.bytes ++ rest) :
+    ∃ k, Final ((runP ops m).2 ++
+        (runP (List.replicate k .pullBody) ((runP ops m).1.step.1.canContinue .continue)).2) R.d ∧
+      DoneAt cfg R rest (runP (List.replicate k .pullBody) ((runP ops m).1.step.1.canContinue .continue)).1 [] := by
+  have h0' : Phase cfg h0 R rest m (fedOf ops) [] := Or.inl ⟨⟨hB, Or.inl ⟨hst, hu, hhb⟩⟩, rfl⟩
+  have h1 := run_phase hR ops m [] hv hno h0'
+  simp only [List.nil_append] at h1
+  obtain ⟨h2, h3⟩ := phase_step hR h1
+  rcases h2 with ⟨hh, -⟩ | ⟨hw, hcs⟩ | ⟨ω, ρ, hb, hd, hf⟩ | ⟨hdn, hfin⟩
+  · exact absurd hh (h3 rfl)
+  · obtain ⟨k, hk1, hk2⟩ := finish_pulls (R.d.length + 1) _ R.w R.d [] (Nat.lt_succ_self _) (wait_cont hw)
+      (by simp [dataOf]) (by simp)
+    exact ⟨k, by rw [hcs]; simpa using hk1, hk2⟩
+  · have hb' := hb
+    obtain ⟨⟨bs, hbs, -⟩, -⟩ := hb'
+    have e : (runP ops m).1.step.1.canContinue .continue = (runP ops m).1.step.1 :=
+      canContinue_other (by intro s e; rw [e] at hbs; cases hbs) _
+    rw [e]
+    obtain ⟨k, hk1, hk2⟩ := finish_pulls (ρ.length + 1) _ ω ρ _ (Nat.lt_succ_self _) hb hd hf
+    exact ⟨k, hk1, hk2⟩
+  · have hdn' := hdn
+    obtain ⟨-, -, -, -, -, hst⟩ := hdn'
+    have e : (runP ops m).1.step.1.canContinue .continue = (runP ops m).1.step.1 :=
+      canContinue_other (by intro s e'; rcases hst with ⟨h1, -⟩ | h1 <;> rw [e'] at h1 <;> cases h1) _
+    rw [e]
+    exact ⟨0, by simpa [runP] using hfin, by simpa [runP] using hdn⟩
+
+/-! ## A simple sufficient condition for the buffer -/
+
+theorem drop_hdr_len (R : Req) (k : Nat) :
+    ((R.lines.drop k).map (·.1 ++ CRLF)).flatten.length ≤ R.hdr.length := by
+  have e := List.take_append_drop k R.lines
+  have : R.hdr = ((R.lines.take k).map (·.1 ++ CRLF)).flatten ++
+      ((R.lines.drop k).map (·.1 ++ CRLF)).flatten := by
+    rw [← List.flatten_append, ← List.map_append, e]; rfl
+  rw [this, List.length_append]; omega
+
+theorem hdr_len {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} {rest y : List UInt8} {m : Machine .receiving}
+    (h : HdrAt cfg h0 R rest m y) : (unread m.reader.input ++ y).length ≤ (R.bytes ++ rest).length := by
+  obtain ⟨-, ⟨-, hu, -⟩ | ⟨k, -, -, -, hu, -⟩⟩ := h
+  · rw [hu]; exact Nat.le_refl _
+  · rw [hu]; have := drop_hdr_len R k
+    simp only [Req.bytes, List.length_append] at this ⊢; omega
+
+/-- A step leaves no more bytes unread than before, or than the request and what follows it. -/
+theorem len_step {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} (hR : ReqOk cfg h0 R) {rest y : List UInt8}
+    {m : Machine .receiving} {cs : List PulledChunk} (h : Phase cfg h0 R rest m y cs) :
+    (unread m.step.1.reader.input ++ y).length ≤
+      max (unread m.reader.input ++ y).length (R.bytes ++ rest).length := by
+  rcases h with ⟨hh, -⟩ | ⟨hw, -⟩ | ⟨ω, ρ, hb, -, -⟩ | ⟨hd, -⟩
+  · rcases read_head hR hh with ⟨hh', -⟩ | ⟨hin, -, huc, hws, -⟩
+    · rw [step_clean (processWrite_pending hh'.1.2.2.2.2.1 (isClosed_hdr hh'))]
+      have := hdr_len hh'
+      exact Nat.le_trans this (Nat.le_max_right _ _)
+    · rw [step_clean (processWrite_waiting hws huc)]
+      have hu : unread (clean m.processRead).reader.input ++ y = R.w ++ rest := by
+        rcases hin with ⟨_, -, -, hu, -⟩ | ⟨_, -, -, hu, -⟩ <;> exact hu
+      rw [hu]; refine Nat.le_trans ?_ (Nat.le_max_right _ _)
+      simp only [Req.bytes, List.length_append]; omega
+  · obtain ⟨⟨bs, hbs, -, -, -, -, hs, -⟩, -, huc, hws, -⟩ := hw
+    have hr : m.processRead = m := (processRead_cases m).2.2.2.2.2.1 _ hbs
+    rw [step_clean (by rw [hr]; exact processWrite_waiting hws huc), hr]
+    exact Nat.le_max_left _ _
+  · obtain ⟨⟨bs, hbs, -, -, -, -, hs, -⟩, -, huc, hws, -⟩ := hb
+    have hr : m.processRead = m := processRead_body hbs hs
+    rw [step_clean (by rw [hr]; exact processWrite_waiting hws huc), hr]
+    exact Nat.le_max_left _ _
+  · obtain ⟨-, -, huc, hws, -, hst⟩ := hd
+    rcases hst with ⟨hcpl, -⟩ | hcl
+    · have hr := (processRead_cases m).2.2.2.1 hcpl
+      unfold Machine.processReaderCompleteState at hr
+      by_cases hx : (m.reader.noMoreInput = true ∧ m.reader.input.atEnd = true) ∨ ¬ m.keepAlive = true
+      · simp only [hx, ↓reduceIte] at hr
+        have hw : (m.setReaderState .closed).processWrite = m.setReaderState .closed :=
+          processWrite_waiting hws huc
+        rw [step_clean (by rw [hr]; exact hw), hr]
+        exact Nat.le_max_left _ _
+      · simp only [hx, ↓reduceIte] at hr
+        rw [step_clean (by rw [hr]; exact processWrite_waiting hws huc), hr]
+        exact Nat.le_max_left _ _
+    · have hr := (processRead_cases m).2.2.2.2.2.2.1 hcl
+      rw [step_clean (by rw [hr]; exact processWrite_waiting hws huc), hr]
+      exact Nat.le_max_left _ _
+
+/-- A pull leaves no more bytes unread. -/
+theorem len_pull {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} {rest y : List UInt8}
+    {m : Machine .receiving} {cs : List PulledChunk} (h : Phase cfg h0 R rest m y cs) :
+    (unread m.pullBody.1.reader.input ++ y).length ≤ (unread m.reader.input ++ y).length := by
+  rcases h with ⟨hh, -⟩ | ⟨hw, -⟩ | ⟨ω, ρ, hb, -, -⟩ | ⟨hd, -⟩
+  · obtain ⟨⟨-, hib, -⟩, -⟩ := hh
+    obtain ⟨-, z, hz⟩ := pullBody_cons hib
+    rw [hz]; simp only [List.length_append]; omega
+  · obtain ⟨⟨bs, -, -, -, hib, -⟩, -⟩ := hw
+    obtain ⟨-, z, hz⟩ := pullBody_cons hib
+    rw [hz]; simp only [List.length_append]; omega
+  · obtain ⟨⟨bs, -, -, -, hib, -⟩, -⟩ := hb
+    obtain ⟨-, z, hz⟩ := pullBody_cons hib
+    rw [hz]; simp only [List.length_append]; omega
+  · obtain ⟨-, -, -, -, -, hst⟩ := hd
+    have hnb : ∀ bs, m.reader.state ≠ .readBody bs := by
+      intro bs e
+      rcases hst with ⟨e2, -⟩ | e2 <;> rw [e] at e2 <;> cases e2
+    obtain ⟨b, hp⟩ := pull_none_of hnb
+    rw [hp]; exact Nat.le_refl _
+
+theorem cont_input (m : Machine .receiving) : (m.canContinue .continue).reader.input = m.reader.input := by
+  unfold Machine.canContinue
+  cases hst : m.reader.state with
+  | «continue» s =>
+    have hcc : (Status.continue == Status.continue) = true := by decide
+    simp [hcc, Machine.modifyWriter, Machine.setReaderState, Machine.modifyReader]
+  | _ => rfl
+
+/-- **The request and what follows it fit the buffer** (`R.bytes ++ rest` within
+`maxBufferedInputBytes`): then no read overflows, however the bytes are split. -/
+theorem noOverflow_of_bound {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} (hR : ReqOk cfg h0 R)
+    {rest : List UInt8} (hbuf : (R.bytes ++ rest).length ≤ Machine.maxBufferedInputBytes cfg) :
+    ∀ (ops : List Op) (m : Machine .receiving) (cs : List PulledChunk), ValidOps ops →
+      Phase cfg h0 R rest m (fedOf ops) cs →
+      (unread m.reader.input ++ fedOf ops).length ≤ Machine.maxBufferedInputBytes cfg → NoOverflow ops m
+  | [], _, _, _, _, _ => trivial
+  | op :: ops, m, cs, hv, h, hl => by
+    have hmax : ∀ a, a ≤ Machine.maxBufferedInputBytes cfg →
+        max a (R.bytes ++ rest).length ≤ Machine.maxBufferedInputBytes cfg := fun a ha => by omega
+    cases op with
+    | feed D =>
+      refine ⟨fun _ => ?_, ?_⟩
+      · rw [phase_config h]; simp only [fedOf, List.length_append] at hl
+        have : D.data.toList.length = D.size := by simp
+        omega
+      · refine noOverflow_of_bound hR hbuf ops (m.feed D) cs hv (phase_feed D h ?_) ?_
+        · intro _; simp only [fedOf, List.length_append] at hl
+          have : D.data.toList.length = D.size := by simp
+          omega
+        · by_cases hc : m.reader.state = .closed
+          · rw [feed_closed hc]; simp only [fedOf, List.length_append] at hl ⊢; omega
+          · have hnd : ¬ Dead m := by
+              intro hd
+              rcases h with ⟨hh, -⟩ | ⟨⟨⟨bs, hbs, -⟩, -⟩, -⟩ | ⟨-, -, ⟨⟨bs, hbs, -⟩, -⟩, -⟩ | ⟨⟨-, -, -, -, -, hst⟩, -⟩
+              · rcases hdr_state hh with e | ⟨k, e⟩ <;> rcases hd with e2 | ⟨er, e2⟩ <;> rw [e] at e2 <;> cases e2
+              · rcases hd with e2 | ⟨er, e2⟩ <;> rw [hbs] at e2 <;> cases e2
+              · rcases hd with e2 | ⟨er, e2⟩ <;> rw [hbs] at e2 <;> cases e2
+              · rcases hst with ⟨e, -⟩ | e
+                · rcases hd with e2 | ⟨er, e2⟩ <;> rw [e] at e2 <;> cases e2
+                · exact hc e
+            have hib : InBounds m := by
+              rcases h with ⟨⟨⟨-, hib, -⟩, -⟩, -⟩ | ⟨⟨⟨-, -, -, -, hib, -⟩, -⟩, -⟩ |
+                ⟨-, -, ⟨⟨-, -, -, -, hib, -⟩, -⟩, -⟩ | ⟨⟨-, -, -, -, -, hst⟩, -⟩
+              · exact hib
+              · exact hib
+              · exact hib
+              · rcases hst with ⟨-, -, hib, -⟩ | e
+                · exact hib
+                · exact absurd e hc
+            have hb : (unread m.reader.input).length + D.size ≤ Machine.maxBufferedInputBytes m.config := by
+              rw [phase_config h]; simp only [fedOf, List.length_append] at hl
+              have : D.data.toList.length = D.size := by simp
+              omega
+            rw [feed_live hnd hib hb]
+            show (unread (m.reader.feed D).input ++ fedOf ops).length ≤ _
+            rw [unread_readerFeed m D hib]
+            simp only [fedOf, List.length_append] at hl ⊢; omega
+    | step =>
+      exact noOverflow_of_bound hR hbuf ops m.step.1 cs hv (phase_step hR h).1
+        (Nat.le_trans (len_step hR h) (hmax _ (by simpa [fedOf] using hl)))
+    | pullBody =>
+      exact noOverflow_of_bound hR hbuf ops m.pullBody.1 _ hv (phase_pull h)
+        (Nat.le_trans (len_pull h) (by simpa [fedOf] using hl))
+    | canContinue st =>
+      obtain ⟨rfl, hv'⟩ := hv
+      exact noOverflow_of_bound hR hbuf ops _ cs hv' (phase_cont h)
+        (by show (unread (m.canContinue .continue).reader.input ++ _).length ≤ _
+            rw [cont_input]; simpa [fedOf] using hl)
+    | noMoreInput =>
+      obtain ⟨hf, hv'⟩ := hv
+      have h' : Phase cfg h0 R rest m [] cs := by simpa [fedOf, hf] using h
+      exact noOverflow_of_bound hR hbuf ops _ cs hv' (by rw [hf]; exact phase_noMore h')
+        (by show (unread m.reader.input ++ _).length ≤ _; simpa [fedOf] using hl)
+    | _ => exact absurd hv (by simp [ValidOps])
+
+/-- `split_read` with the simple buffer condition: the request and what follows it fit
+`maxBufferedInputBytes`. -/
+theorem split_read_bound {cfg : Protocol.H1.Config} {h0 : Nat} {R : Req} {rest : List UInt8} (hR : ReqOk cfg h0 R)
+    (m : Machine .receiving) (ops : List Op) (hB : Base cfg m (fedOf ops)) (hst : m.reader.state = .needStartLine)
+    (hhb : m.reader.headerBytesRead = h0) (hv : ValidOps ops)
     (hu : unread m.reader.input ++ fedOf ops = R.bytes ++ rest)
     (hbuf : (R.bytes ++ rest).length ≤ Machine.maxBufferedInputBytes cfg) :
-    ∃ k, Final ((runP ops m).2 ++ (runP (List.replicate k .pullBody) (runP ops m).1.step.1).2) R.d ∧
-      DoneAt cfg R rest (runP (List.replicate k .pullBody) (runP ops m).1.step.1).1 [] := by
-  have h0' : Phase cfg h0 R rest m (fedOf ops ++ []) [] :=
-    Or.inl ⟨⟨hB, Or.inl ⟨hst, by simpa using hu, hhb⟩⟩, rfl⟩
-  obtain ⟨h1, -⟩ := run_phase hR ops m [] [] hops h0' (by simpa [List.append_assoc, hu] using hbuf)
-  simp only [List.nil_append] at h1
-  obtain ⟨h2, -, h3⟩ := phase_step hR h1
-  rcases h2 with ⟨hh, -⟩ | ⟨ω, ρ, hb, hd, hf⟩ | ⟨hdn, hfin⟩
-  · exact absurd hh (h3 rfl)
-  · obtain ⟨k, hk1, hk2⟩ := finish_pulls (ρ.length + 1) _ ω ρ _ (Nat.lt_succ_self _) hb hd hf
-    exact ⟨k, hk1, hk2⟩
-  · refine ⟨0, by simpa [runP] using hfin, by simpa [runP] using hdn⟩
+    ∃ k, Final ((runP ops m).2 ++
+        (runP (List.replicate k .pullBody) ((runP ops m).1.step.1.canContinue .continue)).2) R.d ∧
+      DoneAt cfg R rest (runP (List.replicate k .pullBody) ((runP ops m).1.step.1.canContinue .continue)).1 [] :=
+  split_read hR m ops hB hst hhb hv
+    (noOverflow_of_bound hR hbuf ops m [] hv (Or.inl ⟨⟨hB, Or.inl ⟨hst, hu, hhb⟩⟩, rfl⟩) (by rw [hu]; exact hbuf)) hu
 
 end HttpSpec.RealSplitComplete
