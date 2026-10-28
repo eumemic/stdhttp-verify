@@ -132,8 +132,40 @@ mutations, 24 FRO test files, segmentation tests).
 
 See `spec/README.md`: what is proven about the patched copy (kernel-checked): the parsers' prefix
 consistency and soundness, RFC 9112 framing for the whole receiving machine (`no_desync`,
-`pulled_bodies`, `nothing_after_rejection`), and machine-level segmentation independence
+`pulled_bodies`, `nothing_after_rejection`), machine-level segmentation independence
 (`read_split`, `pull_split`, and `read_split_drain`, `pull_split_drain` for the body drain after
-an early response), completeness (`request_read`: every request within the limits is read, with
-`Std.Http`'s deviations from the RFC as explicit conditions), with the conditions each result
-needs.
+an early response), and completeness: every request within the limits is read, whole
+(`request_read`), split into reads in any way (`split_read`), and as a stream on one connection
+with the application's response operations interleaved (`conn_read`); the URI and Host parsers
+accept every request-target and Host value within their limits (`targetHost_ok`). `Std.Http`'s
+deviations from the RFC are explicit conditions, with the conditions each result needs.
+
+## 9. Found while proving: `=` in query values, and host names that begin with an IPv4 address
+
+Found while proving that the URI and Host parsers accept every valid target and Host value
+(`spec/Spec/Real/URIComplete.lean`), and checked against the toolchain's own `Std.Http`
+(`nightly-2026-10-20`), both on the parsers and through `Protocol.H1.Machine`:
+
+    GET /a?b=c HTTP/1.1                       → read
+    GET /a?token=YWJj== HTTP/1.1              → 400 Bad Request
+    GET /login?next=/home?tab=1 HTTP/1.1      → 400 Bad Request
+    GET / HTTP/1.1 + Host: 1.2.3.4-x.example  → 400 Bad Request
+
+- **A query parameter with more than one `=`.** `parseQuery` splits each `&`-separated parameter
+  at `=` and joins everything after the first `=` back together as the value
+  (`String.intercalate "=" value`), so it is written to accept `a=b=c` with the value `b=c`. The
+  value then goes through `EncodedQueryParam.fromString?`, whose character class
+  (`isQueryDataChar`) excludes `=`, so the whole target is rejected. RFC 3986 allows `=` anywhere
+  in a query, and raw `=` in values is common: base64 padding (`?token=YWJj==`), nested URLs
+  (`?next=/home?tab=1`). Percent-encoded (`?b=c%3Dd`) is accepted.
+- **A host name that begins with a dotted-quad.** `parseHost` first tries IPv4 on the leading
+  digits and dots and falls back to a DNS name only if libuv rejects them. When libuv accepts them,
+  it returns that address and leaves the rest of the name unread, and the Host check fails:
+  `1.2.3.4-x.example` and `1.2.3.4x.example` (valid DNS names) get 400; so do the same names in
+  authority-form and absolute-form targets. `1.2.3.4.nip.io` (libuv rejects `1.2.3.4.`) and
+  `123.example.com` are accepted. RFC 3986 §3.2.2 makes a host an IPv4 literal only if the whole
+  host matches `IPv4address`.
+
+Not yet reported upstream. The completeness theorems state both as conditions: at most one `=` in
+each query parameter, and, for a name that begins with a digit, libuv rejects its leading digits
+and dots.

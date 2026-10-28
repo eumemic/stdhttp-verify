@@ -8,7 +8,10 @@ Differential testing and formal verification of Lean's built-in HTTP/1.1 server,
   proving: a request with an overlong request-target gets 414 or 400 depending on where a read ends
   (RFC 9112 §3 requires 414); the server reads at most 8192 bytes at a time, and in a local test
   such a request sent in one write got 400 —
-  [leanprover/lean4#16035](https://github.com/leanprover/lean4/issues/16035). Details in `FINDINGS.md`.
+  [leanprover/lean4#16035](https://github.com/leanprover/lean4/issues/16035). Two more, found while
+  proving the URI parser complete (not yet reported): a query parameter with more than one `=`
+  (`?token=YWJj==`) and a host name that begins with an IPv4 address (`1.2.3.4-x.example`) get 400
+  (FINDINGS §9). Details in `FINDINGS.md`.
 - **Proofs** (`spec/`, checked by Lean's kernel): in a patched copy of `Std.Http` (`fix/`), the
   parsers the server runs on request syntax — request line, header lines, chunk-size lines,
   trailer sections — are rewritten as total, end-of-input-strict functions and proven to give the
@@ -35,9 +38,17 @@ Differential testing and formal verification of Lean's built-in HTTP/1.1 server,
   read and pull loops then end in the same machine, or both wait with the difference unchanged.
   Conversely, the machine reads every request within its configured limits: with a whole request
   in its buffer, the read loop records the head and pulls hand out the decoded body
-  (`request_read`; `request_read_continue` with `Expect: 100-continue`), and the same holds however
-  the request is split into reads, with steps and pulls in between (`split_read`). Where `Std.Http` is stricter than the RFC (ASCII field values, recognized methods, its
-  Host check, its Transfer-Encoding rules), the theorem states that as a condition.
+  (`request_read`; `request_read_continue` with `Expect: 100-continue`); the same holds however
+  the request is split into reads, with steps, pulls, the application's `canContinue` and the end
+  of the input in between (`split_read`); and on a connection carrying a stream of requests, with
+  the application's response operations interleaved, every request is read in turn, its body
+  handed out or, after an early response, read and discarded (`conn_read`, `conn_finish`). The URI
+  and Host parsers accept every request-target in the four forms of RFC 9112 §3.2 (absolute-form
+  with the `http` and `https` schemes) and every Host value, within their limits (`targetHost_ok`). Where `Std.Http` is stricter than the RFC (ASCII
+  field values, recognized methods, its URI and Host restrictions, its Transfer-Encoding rules),
+  the theorems state that as a condition; two of the URI restrictions are the bugs of FINDINGS §9.
+  `Std.Http` parses IP literals with libuv, which the kernel cannot evaluate, so those cases take
+  libuv's answer as a hypothesis.
   See `spec/README.md` for exactly what is proven, under which conditions, and what
   each result trusts.
 
@@ -51,8 +62,12 @@ and `parseSingleHeader` call them (the previous versions are kept as `*Legacy`; 
 reads the `CRLF` after chunk data as two bytes instead of through a private helper), and
 `Protocol/H1.lean`, whose 18 `partial def`s (the read and write loops) are total definitions with
 termination proofs, whose helpers are public so that proofs can refer to them, and which checks the
-start-line length limit on complete lines only (the fix for the 414/400 finding); otherwise
-unchanged. Licensed under
+start-line length limit on complete lines only (the fix for the 414/400 finding);
+`Data/URI/Parser.lean`, whose scanning helpers (`partial` upstream), path loop (a `while` loop
+upstream) and `parseRequestTarget`'s `where` clauses are total, top-level definitions, with its
+helpers public (the shipped version is kept as `ParserLegacy.lean`; `spec/Spec/Real/URIEquiv.lean`
+checks that both give the same results), and `Data/URI/Encoding.lean`, whose percent-encoding
+check's inner loop is a top-level definition; otherwise unchanged. Licensed under
 Apache 2.0 (`LICENSE`).
 
 - `servers/lean_stdhttp/` — HTTP Garden echo origin built on `Std.Http` (toolchain pinned in `lean-toolchain`).
