@@ -409,7 +409,8 @@ theorem target_ok {mh : Request.Head} (h : TargetSuits mh.method mh.uri) :
 
 /-- `Std.Http`'s check of a single Host value against the request-target: in authority-form
 (CONNECT) the Host value must parse and match the target's authority; otherwise it must be empty
-or parse. `Header.Host.parse` is `Std.Http`'s host parser, which this project does not verify. -/
+or parse. `URIComplete` proves it for every Host value within the parser's limits
+(`hostAccepted_other`, `hostAccepted_connect`). -/
 def HostAccepted (T : RequestTarget) (V : Header.Value) : Bool :=
   match T with
   | .authorityForm a =>

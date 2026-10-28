@@ -1,4 +1,4 @@
-import Spec.Real.SplitComplete
+import Spec.Real.URIComplete
 
 /-!
 # A request that meets every condition of `request_read` and `split_read`
@@ -6,9 +6,7 @@ import Spec.Real.SplitComplete
 `GET / HTTP/1.1`, `Host: a`, `Content-Length: 1` and the body `x`, on a fresh machine with the
 default configuration: in the buffer at once (`example_request`), and fed one byte per read with a
 step and a pull after each (`example_split`). This shows that the conditions can all hold at once.
-
-Both depend on the standard axioms and on two facts evaluated by the compiler (`native_decide`),
-because the kernel cannot evaluate `Std.Http`'s URI and Host parsers: `t_origin` and `host_a`.
+The target and Host conditions come from `URIComplete`. Both depend on the standard axioms only.
 -/
 
 open Std.Http Std.Http.Protocol.H1 Std.Http.Internal
@@ -24,9 +22,6 @@ def m0 : Machine .receiving := { config := {}, reader := { input := (⟨reqBytes
 def lines0 : List (List UInt8 × List UInt8) :=
   [(ascii "Host: a", ascii "Host"), (ascii "Content-Length: 1", ascii "Content-Length")]
 
-theorem t_origin : (match HttpSpec.Strict.parseTarget (ascii "/") with
-    | .ok (.originForm _ _) => true | _ => false) = true := by native_decide
-theorem host_a : (Header.Host.parse ⟨"a", by decide⟩).isSome = true := by native_decide
 
 example : unread m0.reader.input = reqBytes := rfl
 example : HttpSpec.Strict.RequestLineFits (rlim m0.config) (ascii "GET / HTTP/1.1\r\n") (ascii "GET") (ascii "/") 0x31 0x31 :=
@@ -34,12 +29,18 @@ example : HttpSpec.Strict.RequestLineFits (rlim m0.config) (ascii "GET / HTTP/1.
 example : HeaderLineFits (hlim m0.config) (ascii "Host: a") (ascii "Host") :=
   ⟨ascii " ", ascii "a", [], by decide, by decide, by decide, by decide, by decide, by decide, by decide, by decide, by decide⟩
 
-theorem target_slash : ∃ p q, HttpSpec.Strict.parseTarget (ascii "/") = .ok (.originForm p q) := by
-  have h0 := t_origin
-  revert h0
-  cases HttpSpec.Strict.parseTarget (ascii "/") with
-  | error _ => intro h; cases h
-  | ok T => cases T <;> intro h <;> first | exact ⟨_, _, rfl⟩ | cases h
+theorem origin_slash : URIComplete.Origin {} (ascii "/") :=
+  .path (ss := [[]]) ⟨fun s hs => by simp at hs; subst hs; exact ⟨by simp, .nil, by decide⟩,
+    by simp, by decide, by decide⟩
+
+theorem target_slash : ∃ p q, HttpSpec.Strict.parseTarget (ascii "/") = .ok (.originForm p q) :=
+  URIComplete.parseTarget_origin origin_slash
+
+theorem host_a : URIComplete.HostOk {} (ascii "a") :=
+  .name ⟨by decide, by decide, [ascii "a"], by simp, rfl, fun l hl => by
+      simp at hl; subst hl
+      exact ⟨by decide, by decide, ⟨_, rfl, by decide⟩, ⟨_, rfl, by decide⟩⟩⟩
+    (fun b hb => by simp [ascii] at hb; subst hb; decide)
 
 theorem vals_of (n : String) (ls : List (List UInt8 × List UInt8)) {vs : List (List UInt8)}
     (hf : lines0.filter (fun l => l.2.map toLowerAscii == ascii n) = ls)
@@ -88,29 +89,12 @@ theorem req0 : ∃ R : Req, ReqOk {} 0 R ∧ R.bytes = reqBytes ∧ R.d = ascii 
         by decide, by decide, by decide⟩
     · exact ⟨ascii " ", ascii "1", [], by decide, by decide, by decide, by decide, by decide, by decide,
         by decide, by decide, by decide⟩
-  · intro hs hhs _
-    unfold LineVals at hhs
-    rw [show lines0.filter (fun l => l.2.map toLowerAscii == ascii "host") =
-      [(ascii "Host: a", ascii "Host")] by decide] at hhs
-    cases hhs with
-    | cons h1 h2 =>
-      cases h2
-      refine ⟨_, rfl, ?_⟩
-      intro V hV
-      rw [fieldOf_unique h1 hfa] at hV
-      have hfc : ∀ x ∈ V.value.toList, Char.fieldContent x = true := by
-        simpa [List.all_eq_true] using V.isValidHeaderValue.1
-      have hVa : V.value = "a" := ascii_inj (fun c hc => toNat_lt_of_fieldContent (hfc c hc)) (by decide) hV
-      obtain ⟨val, prf⟩ := V
-      simp only at hVa
-      subst hVa
-      exact decide_eq_true (Or.inr host_a)
+  · exact URIComplete.reqOk_host (R := R0 (.originForm p q)) (Or.inl ⟨ascii "a",
+      vals_of "host" [(ascii "Host: a", ascii "Host")] (by decide) (.cons hfa .nil),
+      .origin (show Method.get ≠ Method.connect by decide) origin_slash (Or.inr ⟨ascii "a", [], rfl, host_a, .none⟩)⟩) hT
 
 /-- **A request that meets every condition of `request_read`**: `GET / HTTP/1.1`, `Host: a`,
-`Content-Length: 1`, body `x`, on the default configuration. Two facts here are evaluated by the
-compiler (`native_decide`), not the kernel: that `Std.Http`'s URI parser reads `/` as an
-origin-form target (`t_origin`), and that its Host parser accepts `a` (`host_a`); the kernel
-cannot evaluate those parsers. -/
+`Content-Length: 1`, body `x`, on the default configuration. -/
 theorem example_request : ∃ k m' ps, pullN k m0.processRead = (m', ps) ∧ Delivered ps (ascii "x") ∧
     m'.reader.state = .complete ∧ unread m'.reader.input = [] := by
   obtain ⟨R, hR, hby, hd, hl, hrl, hw⟩ := req0

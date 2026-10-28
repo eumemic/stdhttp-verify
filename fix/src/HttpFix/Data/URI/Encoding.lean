@@ -79,22 +79,27 @@ For example:
 - `%2` is invalid (percent followed by only one digit)
 - `%GG` is invalid (percent followed by non-hex characters)
 -/
-def isValidPercentEncoding (ba : ByteArray) : Bool :=
-  let rec loop (i : Nat) : Bool :=
-    if h : i < ba.size then
-      let c := ba[i]'h
-      if c = '%'.toUInt8 then
-          if h₂ : i + 2 < ba.size then
-            let d1 := ba[i + 1]'(by omega)
-            let d2 := ba[i + 2]'h₂
-            if isHexDigitByte d1 && isHexDigitByte d2 then
-              loop (i + 3)
-          else false
+def isValidPercentEncodingFrom (ba : ByteArray) (i : Nat) : Bool :=
+  if h : i < ba.size then
+    let c := ba[i]'h
+    if c = '%'.toUInt8 then
+        if h₂ : i + 2 < ba.size then
+          let d1 := ba[i + 1]'(by omega)
+          let d2 := ba[i + 2]'h₂
+          if isHexDigitByte d1 && isHexDigitByte d2 then
+            isValidPercentEncodingFrom ba (i + 3)
         else false
-      else loop (i + 1)
-    else true
-  termination_by ba.size - i
-  loop 0
+      else false
+    else isValidPercentEncodingFrom ba (i + 1)
+  else true
+termination_by ba.size - i
+
+/--
+Validates that all percent signs in a byte array are followed by exactly two hexadecimal digits
+(`isValidPercentEncodingFrom` from the start; upstream the loop is a local `let rec`).
+-/
+def isValidPercentEncoding (ba : ByteArray) : Bool :=
+  isValidPercentEncodingFrom ba 0
 
 /--
 Converts a nibble (4-bit value, 0-15) to its hexadecimal digit representation. Returns '0'-'9' for
