@@ -8,11 +8,11 @@ Differential testing and formal verification of Lean's built-in HTTP/1.1 server,
   proving: a request with an overlong request-target gets 414 or 400 depending on where a read ends
   (RFC 9112 §3 requires 414); the server reads at most 8192 bytes at a time, and in a local test
   such a request sent in one write got 400 —
-  [leanprover/lean4#16035](https://github.com/leanprover/lean4/issues/16035). Two more, found while
+  [leanprover/lean4#16035](https://github.com/leanprover/lean4/issues/16035), fix in [#16080](https://github.com/leanprover/lean4/pull/16080). Two more, found while
   proving the URI parser complete: a query parameter with more than one `=` (`?token=YWJj==`) and a
   host name that begins with an IPv4 address (`1.2.3.4-x.example`) get 400 — the first already
   reported by another user as [leanprover/lean4#16021](https://github.com/leanprover/lean4/issues/16021),
-  the second reported as [leanprover/lean4#16058](https://github.com/leanprover/lean4/issues/16058);
+  the second reported as [leanprover/lean4#16058](https://github.com/leanprover/lean4/issues/16058), fix in [#16079](https://github.com/leanprover/lean4/pull/16079);
   both are fixed in the patched copy (FINDINGS §9). Details in `FINDINGS.md`.
 - **Proofs** (`spec/`, checked by Lean's kernel): in a patched copy of `Std.Http` (`fix/`), the
   parsers the server runs on request syntax — request line, header lines, chunk-size lines,

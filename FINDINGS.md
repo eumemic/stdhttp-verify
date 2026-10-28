@@ -36,7 +36,7 @@ swallowed, the position backtracks, and the following `crlf` fails on a byte tha
 which is a hard error → `.badMessage` → 400.
 
 Reported: https://github.com/leanprover/lean4/issues/15840 (2026-10-21).
-Draft PR: https://github.com/leanprover/lean4/pull/15841 (branch `eumemic/lean4:http-chunk-ext-eof`).
+PR: https://github.com/leanprover/lean4/pull/15841 (branch `eumemic/lean4:http-chunk-ext-eof`).
 
 Fix: `optionalUnlessEof` (backtracks on ordinary failures, re-raises `.eof`), used in `manyItems`
 and `parseChunkSize`. Patch: `upstream/fix-http-chunk-ext-eof.patch`; PR text in `upstream/pr/`. Tested on the
@@ -107,7 +107,8 @@ ambiguity; `spec/Spec/Chunked.lean` states the accepted grammar with this lenien
 
 ## 7. Found while proving: 400 or 414 for a long request-target, depending on read boundaries
 
-Reported as [leanprover/lean4#16035](https://github.com/leanprover/lean4/issues/16035).
+Reported as [leanprover/lean4#16035](https://github.com/leanprover/lean4/issues/16035); fix in
+[#16080](https://github.com/leanprover/lean4/pull/16080).
 
 A request whose target exceeds `maxUriLength` (default 8192) should get 414 (RFC 9112 §3: a
 server "MUST respond with a 414 (URI Too Long)"). `Std.Http` gives 414 only if the bytes up to
@@ -167,7 +168,8 @@ Found while proving that the URI and Host parsers accept every valid target and 
   authority-form and absolute-form targets. `1.2.3.4.nip.io` (libuv rejects `1.2.3.4.`) and
   `123.example.com` are accepted. RFC 3986 §3.2.2 makes a host an IPv4 literal only if the whole
   host matches `IPv4address`. Reported as
-  [leanprover/lean4#16058](https://github.com/leanprover/lean4/issues/16058).
+  [leanprover/lean4#16058](https://github.com/leanprover/lean4/issues/16058); fix in
+  [#16079](https://github.com/leanprover/lean4/pull/16079).
 
 The patched copy (`fix/src/HttpFix/Data/URI/Parser.lean`) fixes both: `parseQuery` keeps the `=`
 after the first, percent-encoded, in the value (`String.intercalate "%3D" value`, so `key=a=b`
