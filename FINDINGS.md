@@ -135,7 +135,9 @@ See `spec/README.md`: what is proven about the patched copy (kernel-checked): th
 consistency and soundness, RFC 9112 framing for the whole receiving machine (`no_desync`,
 `pulled_bodies`, `nothing_after_rejection`), machine-level segmentation independence
 (`read_split`, `pull_split`, and `read_split_drain`, `pull_split_drain` for the body drain after
-an early response), and completeness: every request within the limits is read, whole
+an early response), the same for whole runs of a model of the connection loop with an application
+that reads each body before responding (`serve_split`: same bytes written, same requests handed
+out, however the input is split into reads), and completeness: every request within the limits is read, whole
 (`request_read`), split into reads in any way (`split_read`), and as a stream on one connection
 with the application's response operations interleaved (`conn_read`); the URI and Host parsers
 accept every request-target and Host value within their limits (`targetHost_ok`). `Std.Http`'s

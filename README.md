@@ -38,7 +38,11 @@ Differential testing and formal verification of Lean's built-in HTTP/1.1 server,
   while the reader discards the rest of the body, the same holds except that the split run can be
   ahead by some bytes of the current chunk's data (`read_split_drain`, `pull_split_drain`); the
   read and pull loops then end in the same machine, or both wait with the difference unchanged.
-  Conversely, the machine reads every request within its configured limits: with a whole request
+  End to end, for a model of the connection loop with an application that reads each request's
+  whole body and then responds from the request: however the input is split into nonempty reads,
+  with no read overflowing the input buffer, the loop stops on one split if and only if on the
+  other, having written the same bytes and handed the application the same request heads and
+  bodies (`serve_split`). Conversely, the machine reads every request within its configured limits: with a whole request
   in its buffer, the read loop records the head and pulls hand out the decoded body
   (`request_read`; `request_read_continue` with `Expect: 100-continue`); the same holds however
   the request is split into reads, with steps, pulls, the application's `canContinue` and the end
